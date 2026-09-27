@@ -5,6 +5,7 @@
 #  Version:        1.0.0
 #  Author:         KCE7072
 #  Description:    Auto-click raid buttons on X/Twitter raid posts
+#  Created:        27/09/2026
 # =============================================================================
 
 from telethon import events
@@ -16,14 +17,13 @@ import asyncio
 import json
 import os
 import re
-import time
 from datetime import datetime
 from pathlib import Path
 
 VERSION = "1.0.0"
 CATEGORY = "utilities"
 
-# --- Config ---
+# ─── Config ──────────────────────────────────────────────────────────────────
 PROJECT_ROOT = Path(__file__).parent.parent
 DB_DIR = PROJECT_ROOT / "DB"
 DB_DIR.mkdir(exist_ok=True)
@@ -32,7 +32,7 @@ DB_FILE = DB_DIR / "cryptoraid.json"
 RAID_KEYWORDS = ['raid', 'smash', 'retweet', 'raid tweet', 'reply on x', 'lfg raid']
 BUTTON_TARGETS = ['👊', '🤛', '✊', '🤜', '🤝', 'Verify', 'Verified', '✅', 'Confirmed']
 
-# --- Persistent storage ---
+# ─── Persistent storage ──────────────────────────────────────────────────────
 def load_db():
     try:
         if DB_FILE.exists():
@@ -80,12 +80,13 @@ def init(client_instance):
         ".cryptoraid - Show raid clicker status",
         ".cryptoraid_stats - Show smash statistics",
         ".cryptoraid_log [n] - Show last N smashes",
-        ".cryptoraid_reset - Reset the smash record"
+        ".cryptoraid_reset - Reset the smash record",
     ]
-    description = "🎯 Crypto Raid - Auto-clicks 👊 buttons on X raid posts"
+    description = "🎯 Crypto Raid – Auto-clicks 👊 buttons on X raid posts | Created: 27/09/2026"
     add_handler("cryptoraid", commands, description)
 
 
+# ─── Command handlers ────────────────────────────────────────────────────────
 @CipherElite.on(events.NewMessage(pattern=r"\.cryptoraid$"))
 @rishabh()
 async def cmd_status(event):
@@ -108,6 +109,7 @@ async def cmd_status(event):
             f"🕒 Last smash: `{last}`\n\n"
             f"**Tracked keywords:** {', '.join(RAID_KEYWORDS)}"
         )
+        await event.delete()
     except Exception as e:
         await event.reply(f"❌ Error: `{e}`")
 
@@ -143,6 +145,7 @@ async def cmd_stats(event):
                 lines.append(f"• `{url[:40]}` @ {info.get('date', '?')}")
 
         await event.reply("\n".join(lines))
+        await event.delete()
     except Exception as e:
         await event.reply(f"❌ Error: `{e}`")
 
@@ -160,7 +163,8 @@ async def cmd_log(event):
         )[:n]
 
         if not sorted_items:
-            return await event.reply("📭 No raids smashed yet.")
+            await event.reply("📭 No raids smashed yet.")
+            return
 
         lines = [f"📜 **Last {len(sorted_items)} smashes:**\n"]
         for url, info in sorted_items:
@@ -170,6 +174,7 @@ async def cmd_log(event):
                     f"   {info.get('date', '?')} {info.get('time', '?')} — {info.get('chat', '?')}"
                 )
         await event.reply("\n".join(lines))
+        await event.delete()
     except Exception as e:
         await event.reply(f"❌ Error: `{e}`")
 
@@ -183,16 +188,22 @@ async def cmd_reset(event):
         DB["last"] = None
         save_db(DB)
         await event.reply("🔄 Raid record reset.")
+        await event.delete()
     except Exception as e:
         await event.reply(f"❌ Error: `{e}`")
 
 
-# --- THE ACTUAL RAID SMASHER ---
+# ─── THE ACTUAL RAID SMASHER ─────────────────────────────────────────────────
 @CipherElite.on(events.NewMessage)
+@rishabh()
 async def raid_detector(event):
     try:
         text = event.raw_text or ""
         if not text:
+            return
+
+        # Skip if command message
+        if text.startswith("."):
             return
 
         if not has_raid_intent(text):
@@ -207,6 +218,7 @@ async def raid_detector(event):
         if not new_urls:
             return
 
+        # Check if the message has any buttons
         if not event.buttons:
             return
 
@@ -228,6 +240,7 @@ async def raid_detector(event):
         if clicked_row is None:
             return
 
+        # Click the button
         try:
             await event.click(clicked_row, clicked_col)
         except FloodWaitError as e:
@@ -240,6 +253,7 @@ async def raid_detector(event):
             print(f"[cryptoraid] click error: {e}")
             return
 
+        # Save to database
         chat = await event.get_chat()
         chat_title = getattr(chat, "title", "Unknown")
 
@@ -258,6 +272,7 @@ async def raid_detector(event):
         DB["last"] = now.strftime("%Y-%m-%d %H:%M:%S")
         save_db(DB)
 
+        # Notify in chat
         try:
             await event.reply(
                 f"👊 **Raid Smashed!**\n"
