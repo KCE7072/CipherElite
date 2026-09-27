@@ -1,10 +1,6 @@
 # =============================================================================
-#  CipherElite Userbot Plugin
-#
-#  Plugin Name:    cryptoraid
-#  Version:        2.0.0
-#  Author:         KCE7072
-#  Description:    Auto-clicks raid buttons and logs every smash
+#  CipherElite Userbot Plugin - cryptoraid v2.1
+#  Silent raid smasher with private log notifications
 # =============================================================================
 
 from telethon import events
@@ -18,8 +14,10 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 CATEGORY = "utilities"
+
+LOG_CHAT_ID = -1004453857887
 
 PROJECT_ROOT = Path(__file__).parent.parent
 DB_DIR = PROJECT_ROOT / "DB"
@@ -67,6 +65,10 @@ def has_raid_intent(text):
     return any(k in lower for k in RAID_KEYWORDS)
 
 
+def format_12h(dt):
+    return dt.strftime("%I:%M:%S %p")
+
+
 def init(client_instance):
     commands = [
         ".cryptoraid - Show raid clicker status",
@@ -75,7 +77,7 @@ def init(client_instance):
         ".cryptoraid_today - Show today's smashes",
         ".cryptoraid_reset - Reset the smash record",
     ]
-    description = "🎯 Crypto Raid v2.0 - Auto-clicks 👊 buttons and logs every smash"
+    description = "Crypto Raid v2.1 - Silent smasher with private logging"
     add_handler("cryptoraid", commands, description)
 
 
@@ -95,17 +97,16 @@ async def cmd_status(event):
         )
 
         await event.reply(
-            f"🎯 **Crypto Raid Clicker v2.0**\n"
+            f"🎯 **Crypto Raid Clicker v2.1**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"✅ **Status:** Active\n"
+            f"✅ **Status:** Active (Silent)\n"
             f"👊 **Total smashes:** `{total}`\n"
             f"📅 **Today:** `{today_count}`\n"
             f"🔗 **Unique links:** `{len(smashed)}`\n"
             f"🕒 **Last smash:** `{last}`\n"
             f"🚀 **Bot started:** `{started}`\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"🎯 **Watching for:** {', '.join(RAID_KEYWORDS)}\n"
-            f"👊 **Smash button:** {SMASH_BUTTON}"
+            f"📬 **Log group:** `{LOG_CHAT_ID}`"
         )
     except Exception as e:
         await event.reply(f"❌ Error: `{e}`")
@@ -171,7 +172,7 @@ async def cmd_today(event):
         for url, info in today_items[:15]:
             lines.append(
                 f"👊 `{url[:45]}`\n"
-                f"   ⏰ {info.get('time', '?')} — {info.get('chat', '?')[:25]}"
+                f"   ⏰ {info.get('time12', info.get('time', '?'))} — {info.get('chat', '?')[:25]}"
             )
         await event.reply("\n".join(lines))
     except Exception as e:
@@ -198,7 +199,7 @@ async def cmd_log(event):
             if isinstance(info, dict):
                 lines.append(
                     f"👊 `{url[:45]}`\n"
-                    f"   📅 {info.get('date', '?')} ⏰ {info.get('time', '?')}\n"
+                    f"   📅 {info.get('date', '?')} ⏰ {info.get('time12', info.get('time', '?'))}\n"
                     f"   💬 {info.get('chat', '?')[:30]}"
                 )
         await event.reply("\n".join(lines))
@@ -293,6 +294,7 @@ async def raid_detector(event):
             smashed[url] = {
                 "date": now.strftime("%Y-%m-%d"),
                 "time": now.strftime("%H:%M:%S"),
+                "time12": format_12h(now),
                 "ts": now.timestamp(),
                 "chat": chat_title,
                 "button": clicked_text
@@ -303,23 +305,20 @@ async def raid_detector(event):
         DB["last"] = now.strftime("%Y-%m-%d %H:%M:%S")
         save_db(DB)
 
-        today = now.strftime("%Y-%m-%d")
-        today_count = sum(
-            1 for v in smashed.values()
-            if isinstance(v, dict) and v.get("date", "").startswith(today)
-        )
-
         try:
-            await event.reply(
-                f"👊 **Raid Smashed!**\n"
+            log_msg = (
+                f"👊 **Raid Smashed**\n"
                 f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"🔗 `{new_urls[0][:50]}`\n"
-                f"💬 {chat_title[:30]}\n"
-                f"📊 Total: `{DB['count']}`\n"
-                f"📅 Today: `{today_count}`"
+                f"💬 **Chat:** {chat_title}\n"
+                f"🔗 **Link:** https://{new_urls[0]}\n"
+                f"📅 **Date:** {now.strftime('%d/%m/%Y')}\n"
+                f"⏰ **Time:** {format_12h(now)}\n"
+                f"📊 **Total:** {DB['count']}\n"
+                f"━━━━━━━━━━━━━━━━━━━━"
             )
-        except Exception:
-            pass
+            await event.client.send_message(LOG_CHAT_ID, log_msg)
+        except Exception as e:
+            print(f"[cryptoraid] log send error: {e}")
 
     except Exception as e:
         print(f"[cryptoraid] detector error: {e}")
