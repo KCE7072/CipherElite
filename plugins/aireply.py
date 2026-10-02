@@ -23,13 +23,14 @@ CATEGORY = "utilities"
 #  CONFIG
 # ═══════════════════════════════════════════════════════════════
 
-GEMINI_API_KEY = ""  # ← ADD YOUR GEMINI KEY HERE
-AI_LOG_CHAT_ID = 0   # ← ADD YOUR AI REPLY LOG GROUP ID
-QUEUE_CHAT_ID = 0    # ← ADD YOUR QUEUE GROUP ID
+import os
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+AI_LOG_CHAT_ID = int(os.environ.get("AI_LOG_CHAT_ID", "0"))
+QUEUE_CHAT_ID = int(os.environ.get("QUEUE_CHAT_ID", "0"))
 
 # Trigger keywords
 KEYWORDS = ['gm', 'hi', 'hello', 'wagmi', 'moon', 'airdrop', 'lfg', 'wagmi fam']
-
+is
 # Reply settings
 WORD_LIMIT = 5       # Max words in reply
 CONFIDENCE_MIN = 70  # Min confidence to reply
