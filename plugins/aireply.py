@@ -312,6 +312,10 @@ def init(client_instance):
 #  WHITELIST COMMANDS
 # ═══════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════
+#  WHITELIST COMMANDS
+# ═══════════════════════════════════════════════════════════════
+
 @CipherElite.on(events.NewMessage(pattern=r"\.\.aiwl$"))
 async def cmd_aiwl_add(event):
     try:
@@ -381,7 +385,7 @@ async def cmd_aiwl_list(event):
         await event.reply(f"❌ Error: `{e}`")
 
 
-@CipherElite.on(events.NewMessage(pattern=r"\.ai\s+status$"))
+@CipherElite.on(events.NewMessage(pattern=r"\.air\s+status$"))
 @rishabh()
 async def cmd_ai_status(event):
     try:
@@ -412,22 +416,18 @@ async def cmd_ai_status(event):
 async def ai_reply_handler(event):
     """Main handler — decides when to reply."""
     try:
-        # Skip commands
         text = event.raw_text or ""
         if not text or text.startswith(".") or text.startswith(".."):
             return
 
-        # Skip our own messages
         me = await CipherElite.get_me()
         if event.sender_id == me.id:
             return
 
-        # Skip if not whitelisted
         chat_id = event.chat_id
         if not is_whitelisted(chat_id):
             return
 
-        # Skip private chats (DMs) — bot never replies in DMs
         if event.is_private:
             await queue_item(
                 f"📩 **DM RECEIVED**\n"
@@ -437,14 +437,10 @@ async def ai_reply_handler(event):
             )
             return
 
-        # Check trigger
         should_reply = False
 
-        # Trigger 1 — Bot was mentioned
         if event.mentioned:
             should_reply = True
-
-        # Trigger 2 — Reply to our message
         elif event.is_reply:
             try:
                 replied_msg = await event.get_reply_message()
@@ -452,15 +448,12 @@ async def ai_reply_handler(event):
                     should_reply = True
             except Exception:
                 pass
-
-        # Trigger 3 — Keyword in message
         elif has_trigger(text):
             should_reply = True
 
         if not should_reply:
             return
 
-        # Rate limit checks
         if not can_reply_to_user(event.sender_id):
             return
         if not can_reply_in_group(chat_id):
@@ -468,15 +461,12 @@ async def ai_reply_handler(event):
         if not can_reply_daily():
             return
 
-        # Random delay (human simulation)
         delay = random.randint(REPLY_DELAY_MIN, REPLY_DELAY_MAX)
         await asyncio.sleep(delay)
 
-        # Get sender info
         sender = await event.get_sender()
         user_name = getattr(sender, "first_name", "Someone")
 
-        # Get context (last few messages)
         context_msgs = []
         try:
             async for msg in CipherElite.iter_messages(chat_id, limit=5):
@@ -486,22 +476,18 @@ async def ai_reply_handler(event):
         except Exception:
             pass
 
-        # Generate reply
         reply_text = await generate_reply(text, context_msgs)
         if not reply_text:
             return
 
-        # Send reply
         try:
             await event.reply(reply_text)
         except FloodWaitError as e:
             print(f"[aireply] FloodWait {e.seconds}s")
             return
 
-        # Track
         track_reply(chat_id, event.sender_id)
 
-        # Log
         chat = await event.get_chat()
         chat_name = getattr(chat, "title", "Unknown")
         card = build_reply_card(
@@ -514,7 +500,6 @@ async def ai_reply_handler(event):
         )
         await send_log(card)
 
-        # Store in memory
         DB.setdefault("replies", []).append({
             "group_id": chat_id,
             "group_name": chat_name,
@@ -536,7 +521,7 @@ async def ai_reply_handler(event):
 #  MEMORY & STATS COMMANDS
 # ═══════════════════════════════════════════════════════════════
 
-@CipherElite.on(events.NewMessage(pattern=r"\.ai\s+memory$"))
+@CipherElite.on(events.NewMessage(pattern=r"\.air\s+memory$"))
 @rishabh()
 async def cmd_ai_memory(event):
     try:
@@ -553,14 +538,12 @@ async def cmd_ai_memory(event):
         await event.reply(f"❌ Error: `{e}`")
 
 
-@CipherElite.on(events.NewMessage(pattern=r"\.ai\s+stats$"))
+@CipherElite.on(events.NewMessage(pattern=r"\.air\s+stats$"))
 @rishabh()
 async def cmd_ai_stats(event):
     try:
         reset_daily_if_needed()
         replies = DB.get("replies", [])
-        today = today_str()
-        today_replies = [r for r in replies if r.get("ts", 0) > datetime.fromisoformat(today).timestamp()]
         daily = DB.get("daily", {})
 
         lines = [
@@ -582,7 +565,7 @@ async def cmd_ai_stats(event):
         await event.reply(f"❌ Error: `{e}`")
 
 
-@CipherElite.on(events.NewMessage(pattern=r"\.ai\s+replies(?:\s+(\d+))?$"))
+@CipherElite.on(events.NewMessage(pattern=r"\.air\s+replies(?:\s+(\d+))?$"))
 @rishabh()
 async def cmd_ai_replies(event):
     try:
@@ -602,7 +585,7 @@ async def cmd_ai_replies(event):
         await event.reply(f"❌ Error: `{e}`")
 
 
-@CipherElite.on(events.NewMessage(pattern=r"\.ai\s+reset$"))
+@CipherElite.on(events.NewMessage(pattern=r"\.air\s+reset$"))
 @rishabh()
 async def cmd_ai_reset(event):
     try:
@@ -616,7 +599,7 @@ async def cmd_ai_reset(event):
         await event.reply(f"❌ Error: `{e}`")
 
 
-@CipherElite.on(events.NewMessage(pattern=r"\.ai\s+help$"))
+@CipherElite.on(events.NewMessage(pattern=r"\.air\s+help$"))
 @rishabh()
 async def cmd_ai_help(event):
     try:
@@ -628,11 +611,11 @@ async def cmd_ai_help(event):
             "`..aiwl off` — Remove current group\n"
             "`..aiwl list` — Show all whitelisted\n\n"
             "**Status & Stats:**\n"
-            "`.ai status` — Bot status\n"
-            "`.ai stats` — Reply stats\n"
-            "`.ai memory` — Memory info\n"
-            "`.ai replies [n]` — Show last N replies\n"
-            "`.ai reset` — Clear memory (keeps whitelist)\n\n"
+            "`.air status` — Bot status\n"
+            "`.air stats` — Reply stats\n"
+            "`.air memory` — Memory info\n"
+            "`.air replies [n]` — Show last N replies\n"
+            "`.air reset` — Clear memory (keeps whitelist)\n\n"
             "**How it works:**\n"
             "• Bot listens in whitelisted groups\n"
             "• Replies when: mentioned, replied-to, or keyword (gm, hi, wagmi...)\n"
@@ -649,3 +632,5 @@ async def cmd_ai_help(event):
 # ║  === END OF AIReply V1.0 — ALL 4 CHUNKS COMPLETE ===         ║
 # ║  If you see this marker, the plugin is fully pasted.         ║
 # ╚══════════════════════════════════════════════════════════════╝
+
+        
