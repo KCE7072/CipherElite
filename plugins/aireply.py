@@ -24,7 +24,7 @@ CATEGORY = "utilities"
 # ═══════════════════════════════════════════════════════════════
 
 import os
-GEMINI_API_KEY = "AQ.Ab8RN6IOtHAVIblk3zNNJpBHs7wh5hU6U_GZhnE6gYpErCJ_FQ"
+GEMINI_API_KEY = ""
 AI_LOG_CHAT_ID = -1004374819145 # or 0 if no group yet
 QUEUE_CHAT_ID = -1003860044937 # or 0
 
