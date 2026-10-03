@@ -1,5 +1,5 @@
 # =============================================================================
-#  CipherElite Userbot Plugin - aireply.py v1.0 (Stage 1)
+#  CipherElite Userbot Plugin - aireply.py v1.1 (Stage 1)
 #  AI replies in whitelisted groups using CipherElite's ai_config
 # =============================================================================
 
@@ -18,7 +18,7 @@ from pathlib import Path
 from google import genai
 from google.genai import types
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 CATEGORY = "utilities"
 
 # ═══════════════════════════════════════════════════════════════
@@ -28,15 +28,16 @@ CATEGORY = "utilities"
 AI_LOG_CHAT_ID = -1004374819145   # AI REPLY LOG group
 QUEUE_CHAT_ID  = -1003860044937   # QUEUE group
 
-KEYWORDS = ['gm', 'hi', 'hello', 'wagmi', 'moon', 'airdrop', 'lfg', 'wagmi fam']
+# Keywords with word-boundary matching (won't match "this" for "hi")
+KEYWORDS = ['gm', 'hi', 'hello', 'hey', 'wagmi', 'moon', 'airdrop', 'lfg']
 WORD_LIMIT = 5
 REPLY_DELAY_MIN = 3
 REPLY_DELAY_MAX = 8
-MIN_GAP_SAME_USER = 30
+MIN_GAP_SAME_USER = 0        # ⚡ DISABLED as requested
 RATE_LIMIT_HOURLY = 20
 RATE_LIMIT_DAILY = 150
+DEBUG = True                 # 🔍 diagnostic prints — set False once stable
 
-# Speed modes
 SPEED_MODES = {
     "fast": (1, 3),
     "normal": (3, 8),
@@ -44,9 +45,8 @@ SPEED_MODES = {
 }
 CURRENT_SPEED = "normal"
 
-# Reaction settings
 REACT_TO_GM = True
-REACT_PROBABILITY = 0.3  # 30% chance when triggered
+REACT_PROBABILITY = 0.3
 REACTION_EMOJIS = ["🔥", "👀", "🫡", "💪", "😂"]
 
 GEMINI_MODEL = "gemini-3.7-flash"
@@ -63,6 +63,12 @@ Write ONE short reply.
 - Match the vibe of the message
 
 Reply with just the text, nothing else."""
+
+
+def dbg(msg):
+    if DEBUG:
+        print(f"[aireply] {msg}")
+
 
 # ═══════════════════════════════════════════════════════════════
 #  STORAGE
@@ -119,12 +125,22 @@ def is_whitelisted(chat_id):
     return chat_id in DB.get("whitelist", [])
 
 
+# Word-boundary keyword matcher — "hi" won't match "this"
+KEYWORD_PATTERNS = [re.compile(rf"\b{re.escape(k)}\b", re.IGNORECASE) for k in KEYWORDS]
+
+
 def has_trigger(text):
-    lower = (text or "").lower()
-    return any(k in lower for k in KEYWORDS)
+    if not text:
+        return False
+    for pat in KEYWORD_PATTERNS:
+        if pat.search(text):
+            return True
+    return False
 
 
 def can_reply_to_user(user_id):
+    if MIN_GAP_SAME_USER <= 0:
+        return True
     last = DB.get("replied_users", {}).get(str(user_id), 0)
     return (datetime.utcnow().timestamp() - last) >= MIN_GAP_SAME_USER
 
@@ -154,20 +170,21 @@ def track_reply(group_id, user_id):
 
 
 def get_delay():
-    """Get delay range based on current speed mode."""
     lo, hi = SPEED_MODES.get(CURRENT_SPEED, SPEED_MODES["normal"])
     return random.randint(lo, hi)
 
 
 # ═══════════════════════════════════════════════════════════════
-#  GEMINI CALL (uses CipherElite's ai_config)
+#  GEMINI CALL
 # ═══════════════════════════════════════════════════════════════
 
 async def generate_reply(their_message, context_messages=None):
     if not ai_config.is_enabled():
+        dbg("gemini skip: ai_config disabled")
         return None
     api_key = ai_config.get_api_key()
     if not api_key:
+        dbg("gemini skip: no api key")
         return None
 
     context = ""
@@ -202,7 +219,9 @@ Your reply:"""
         if len(words) > WORD_LIMIT:
             text = " ".join(words[:WORD_LIMIT])
         if len(text) < 2 or len(text) > 100:
+            dbg(f"gemini returned bad length: '{text}'")
             return None
+        dbg(f"gemini ok: '{text}'")
         return text
     except Exception as e:
         print(f"[aireply] Gemini error: {e}")
@@ -250,6 +269,8 @@ async def queue_item(text):
         print(f"[aireply] queue error: {e}")
 
 # ═══ END OF CHUNK 1 ═══
+
+
 # ═══════════════════════════════════════════════════════════════
 #  CHUNK 2 — COMMANDS + HANDLERS + AUTO-ONLINE
 # ═══════════════════════════════════════════════════════════════
@@ -267,10 +288,31 @@ def init(client_instance):
         ".kce online - start heartbeat",
         ".kcew - whitelist current group",
         ".kcew off - un-whitelist current group",
+        ".kcew off <chat_id> - un-whitelist by ID",
         ".kcew list - list whitelisted groups",
     ]
-    description = "🤖 KCE AI Reply v1.0 — auto-reply in whitelisted groups"
+    description = "🤖 KCE AI Reply v1.1 — auto-reply in whitelisted groups"
     add_handler("aireply", commands, description)
+
+
+# ─── Silent reply: DM → reply, group → log only ────────────────
+async def _safe_reply(event, text):
+    try:
+        if event.is_private:
+            await event.reply(text)
+        else:
+            await send_log(text)
+    except Exception as e:
+        print(f"[aireply] safe_reply error: {e}")
+
+
+# ─── Owner check ───────────────────────────────────────────────
+async def _is_owner(event):
+    try:
+        me = await CipherElite.get_me()
+        return event.sender_id == me.id
+    except Exception:
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -280,6 +322,8 @@ def init(client_instance):
 @CipherElite.on(events.NewMessage(pattern=r"\.kce$"))
 @rishabh()
 async def cmd_kce_status(event):
+    if not await _is_owner(event):
+        return
     try:
         reset_daily_if_needed()
         wl = DB.get("whitelist", [])
@@ -288,7 +332,7 @@ async def cmd_kce_status(event):
         started = DB.get("started", "?")
         gemini_ok = ai_config.is_enabled() and bool(ai_config.get_api_key())
         msg = (
-            "🤖 **KCE AI Reply v1.0**\n"
+            "🤖 **KCE AI Reply v1.1**\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"🧠 Gemini: {'✅ Ready' if gemini_ok else '❌ Disabled'}\n"
             f"📝 Whitelisted: `{len(wl)}` groups\n"
@@ -299,14 +343,16 @@ async def cmd_kce_status(event):
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"⚙️ Word limit: `{WORD_LIMIT}`"
         )
-        await event.reply(msg)
+        await _safe_reply(event, msg)
     except Exception as e:
-        await event.reply(f"❌ Error: `{e}`")
+        await send_log(f"❌ cmd_kce_status error: `{e}`")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+stats$"))
 @rishabh()
 async def cmd_kce_stats(event):
+    if not await _is_owner(event):
+        return
     try:
         reset_daily_if_needed()
         replies = DB.get("replies", [])
@@ -324,21 +370,23 @@ async def cmd_kce_stats(event):
             f"📅 Today: `{today_count}`",
             f"📈 Daily cap: `{DB['daily'].get('count', 0)}/{RATE_LIMIT_DAILY}`",
             f"⚡ Speed mode: `{CURRENT_SPEED}`",
-            f"🕐 Per-user gap: `{MIN_GAP_SAME_USER}s`",
+            f"🕐 Per-user gap: `{MIN_GAP_SAME_USER}s` (disabled if 0)",
             f"🚦 Per-group hourly cap: `{RATE_LIMIT_HOURLY}`",
         ]
         if top:
             lines.append("\n**Top groups:**")
             for g, c in top:
                 lines.append(f"• {g[:30]} — `{c}`")
-        await event.reply("\n".join(lines))
+        await _safe_reply(event, "\n".join(lines))
     except Exception as e:
-        await event.reply(f"❌ Error: `{e}`")
+        await send_log(f"❌ cmd_kce_stats error: `{e}`")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+memory$"))
 @rishabh()
 async def cmd_kce_memory(event):
+    if not await _is_owner(event):
+        return
     try:
         replies = DB.get("replies", [])
         users = DB.get("replied_users", {})
@@ -349,20 +397,22 @@ async def cmd_kce_memory(event):
             f"👥 Users tracked: `{len(users)}`",
             f"📁 DB: `DB/aireply.json`",
         ]
-        await event.reply("\n".join(lines))
+        await _safe_reply(event, "\n".join(lines))
     except Exception as e:
-        await event.reply(f"❌ Error: `{e}`")
+        await send_log(f"❌ cmd_kce_memory error: `{e}`")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+replies(?:\s+(\d+))?$"))
 @rishabh()
 async def cmd_kce_replies(event):
+    if not await _is_owner(event):
+        return
     try:
         n = int(event.pattern_match.group(1) or 10)
         n = max(1, min(n, 50))
         replies = DB.get("replies", [])[-n:]
         if not replies:
-            return await event.reply("📭 No replies yet.")
+            return await _safe_reply(event, "📭 No replies yet.")
         lines = [f"📜 **Last {len(replies)} replies**\n━━━━━━━━━━━━━━━━━━━━"]
         for r in replies:
             lines.append(
@@ -371,28 +421,32 @@ async def cmd_kce_replies(event):
                 f"  🤖 \"{r.get('bot_reply', '')[:50]}\"\n"
                 f"  🕐 {r.get('time12', '?')}"
             )
-        await event.reply("\n".join(lines))
+        await _safe_reply(event, "\n".join(lines))
     except Exception as e:
-        await event.reply(f"❌ Error: `{e}`")
+        await send_log(f"❌ cmd_kce_replies error: `{e}`")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+reset$"))
 @rishabh()
 async def cmd_kce_reset(event):
+    if not await _is_owner(event):
+        return
     try:
         DB["replies"] = []
         DB["replied_users"] = {}
         DB["hourly"] = {}
         DB["daily"] = {"date": today_str(), "count": 0}
         save_db(DB)
-        await event.reply("🔄 Memory cleared (whitelist kept).")
+        await _safe_reply(event, "🔄 Memory cleared (whitelist kept).")
     except Exception as e:
-        await event.reply(f"❌ Error: `{e}`")
+        await send_log(f"❌ cmd_kce_reset error: `{e}`")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+help$"))
 @rishabh()
 async def cmd_kce_help(event):
+    if not await _is_owner(event):
+        return
     try:
         msg = (
             "🤖 **KCE AI Reply — Commands**\n"
@@ -407,28 +461,30 @@ async def cmd_kce_help(event):
             "`.kce help` — this menu\n\n"
             "**Whitelist:**\n"
             "`.kcew` — whitelist current group\n"
-            "`.kcew off` — remove whitelist\n"
-            "`.kcew list` — list whitelisted\n\n"
-            "**Triggers:** mention • reply-to-me • keyword"
+            "`.kcew off` — remove whitelist (from that group)\n"
+            "`.kcew off <chat_id>` — remove by ID\n"
+            "`.kcew list` — list whitelisted"
         )
-        await event.reply(msg)
+        await _safe_reply(event, msg)
     except Exception as e:
-        await event.reply(f"❌ Error: `{e}`")
+        await send_log(f"❌ cmd_kce_help error: `{e}`")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+speed\s+(fast|normal|slow)$"))
 @rishabh()
 async def cmd_kce_speed(event):
     global CURRENT_SPEED
+    if not await _is_owner(event):
+        return
     try:
         mode = event.pattern_match.group(1).lower()
         if mode not in SPEED_MODES:
-            return await event.reply(f"❌ Unknown mode. Use: `{', '.join(SPEED_MODES.keys())}`")
+            return await _safe_reply(event, f"❌ Unknown mode.")
         CURRENT_SPEED = mode
         lo, hi = SPEED_MODES[mode]
-        await event.reply(f"⚡ Speed set to **{mode}** ({lo}-{hi}s delay)")
+        await _safe_reply(event, f"⚡ Speed set to **{mode}** ({lo}-{hi}s delay)")
     except Exception as e:
-        await event.reply(f"❌ Error: `{e}`")
+        await send_log(f"❌ cmd_kce_speed error: `{e}`")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -437,6 +493,8 @@ async def cmd_kce_speed(event):
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kcew$"))
 async def cmd_kcew_add(event):
+    if not await _is_owner(event):
+        return
     try:
         try: await event.delete()
         except: pass
@@ -460,17 +518,30 @@ async def cmd_kcew_add(event):
         await send_log(f"❌ WL add error: `{e}`")
 
 
-@CipherElite.on(events.NewMessage(pattern=r"\.kcew\s+off$"))
+@CipherElite.on(events.NewMessage(pattern=r"\.kcew\s+off(?:\s+(-?\d+))?$"))
 async def cmd_kcew_remove(event):
+    if not await _is_owner(event):
+        return
     try:
-        try: await event.delete()
-        except: pass
-        chat = await event.get_chat()
-        chat_id = event.chat_id
-        chat_name = getattr(chat, "title", "Unknown")
+        target = event.pattern_match.group(1)
+        if target:
+            chat_id = int(target)
+            chat_name = f"ID {chat_id}"
+            try:
+                entity = await CipherElite.get_entity(chat_id)
+                chat_name = getattr(entity, "title", chat_name)
+            except Exception:
+                pass
+        else:
+            try: await event.delete()
+            except: pass
+            chat = await event.get_chat()
+            chat_id = event.chat_id
+            chat_name = getattr(chat, "title", "Unknown")
+
         wl = DB.get("whitelist", [])
         if chat_id not in wl:
-            return await send_log(f"ℹ️ Not whitelisted: **{chat_name}**")
+            return await send_log(f"ℹ️ Not whitelisted: **{chat_name}** (`{chat_id}`)")
         wl.remove(chat_id)
         DB["whitelist"] = wl
         save_db(DB)
@@ -482,10 +553,12 @@ async def cmd_kcew_remove(event):
 @CipherElite.on(events.NewMessage(pattern=r"\.kcew\s+list$"))
 @rishabh()
 async def cmd_kcew_list(event):
+    if not await _is_owner(event):
+        return
     try:
         wl = DB.get("whitelist", [])
         if not wl:
-            return await event.reply("📭 No whitelisted groups.")
+            return await _safe_reply(event, "📭 No whitelisted groups.")
         lines = ["📋 **KCE Whitelisted Groups**\n"]
         for cid in wl:
             try:
@@ -494,9 +567,9 @@ async def cmd_kcew_list(event):
             except Exception:
                 name = "Unknown"
             lines.append(f"• **{name}** (`{cid}`)")
-        await event.reply("\n".join(lines))
+        await _safe_reply(event, "\n".join(lines))
     except Exception as e:
-        await event.reply(f"❌ Error: `{e}`")
+        await send_log(f"❌ cmd_kcew_list error: `{e}`")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -520,16 +593,21 @@ async def _get_context(event, limit=5):
 @CipherElite.on(events.NewMessage)
 async def kce_reply_handler(event):
     try:
+        # ── Gate 1: whitelist
         if not is_whitelisted(event.chat_id):
             return
+        # ── Gate 2: outgoing
         if event.out:
             return
+        # ── Gate 3: text
         text = event.raw_text or ""
         if not text or text.startswith((".", "..")):
             return
 
         me = await CipherElite.get_me()
         sender = await event.get_sender()
+
+        # ── Gate 4: skip own messages
         if sender and sender.id == me.id:
             return
 
@@ -551,37 +629,44 @@ async def kce_reply_handler(event):
         if not triggered:
             return
 
+        dbg(f"trigger={trigger_type} chat={event.chat_id} user={sender.id if sender else '?'} text='{text[:50]}'")
+
         user_id = event.sender_id
         if not can_reply_to_user(user_id):
+            dbg(f"block: per-user gap")
             return
         if not can_reply_in_group(event.chat_id):
+            dbg(f"block: hourly cap")
             return
         if not can_reply_daily():
+            dbg(f"block: daily cap")
             return
 
         # generate reply
         context = await _get_context(event, 5)
         reply_text = await generate_reply(text, context)
         if not reply_text:
+            dbg("block: gemini returned empty")
             return
 
         # human delay
         delay = get_delay()
+        dbg(f"delay {delay}s before reply")
         await asyncio.sleep(delay)
 
         try:
             sent = await event.reply(reply_text)
+            dbg(f"reply sent: '{reply_text}'")
         except FloodWaitError as e:
+            dbg(f"floodwait {e.seconds}s")
             await asyncio.sleep(e.seconds + 1)
             sent = await event.reply(reply_text)
         except Exception as e:
             print(f"[aireply] reply send error: {e}")
             return
 
-        # track
         track_reply(event.chat_id, user_id)
 
-        # store in DB
         stamp = now_dict()
         chat = await event.get_chat()
         chat_name = getattr(chat, "title", "Unknown")
@@ -607,13 +692,11 @@ async def kce_reply_handler(event):
         DB["replies"] = replies[-500:]
         save_db(DB)
 
-        # log card → AI REPLY LOG group
         card = build_reply_card(
             reply_num, chat_name, user_name, text, reply_text, speed=CURRENT_SPEED
         )
         await send_log(card)
 
-        # queue group → notification
         await queue_item(
             f"💬 **KCE replied in {chat_name}**\n"
             f"👤 {user_name}: \"{text[:100]}\"\n"
@@ -621,7 +704,6 @@ async def kce_reply_handler(event):
             f"🕐 {stamp['time12']}  •  trigger: `{trigger_type}`"
         )
 
-        # auto-react (30% chance)
         if REACT_TO_GM and random.random() < REACT_PROBABILITY:
             try:
                 await sent.react(random.choice(REACTION_EMOJIS))
@@ -636,7 +718,7 @@ async def kce_reply_handler(event):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  AUTO-ONLINE + HEARTBEAT (30s)
+#  AUTO-ONLINE + HEARTBEAT
 # ═══════════════════════════════════════════════════════════════
 
 HEARTBEAT_TASK = None
@@ -647,7 +729,7 @@ async def _heartbeat_loop():
     while True:
         try:
             me = await CipherElite.get_me()
-            print(f"[aireply] heartbeat — online as @{getattr(me, 'username', '?')}")
+            dbg(f"heartbeat — online as @{getattr(me, 'username', '?')}")
         except Exception as e:
             print(f"[aireply] heartbeat error: {e}")
         await asyncio.sleep(30)
@@ -657,16 +739,17 @@ async def _heartbeat_loop():
 @rishabh()
 async def cmd_kce_online(event):
     global HEARTBEAT_TASK
+    if not await _is_owner(event):
+        return
     try:
         if HEARTBEAT_TASK and not HEARTBEAT_TASK.done():
-            return await event.reply("✅ Heartbeat already running.")
+            return await _safe_reply(event, "✅ Heartbeat already running.")
         HEARTBEAT_TASK = asyncio.create_task(_heartbeat_loop())
-        await event.reply("🚀 Heartbeat started (30s interval).")
+        await _safe_reply(event, "🚀 Heartbeat started (30s interval).")
     except Exception as e:
-        await event.reply(f"❌ Error: `{e}`")
+        await send_log(f"❌ cmd_kce_online error: `{e}`")
 
 
-# kick off heartbeat on plugin load
 try:
     HEARTBEAT_TASK = asyncio.create_task(_heartbeat_loop())
 except Exception as e:
@@ -674,7 +757,5 @@ except Exception as e:
 
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║  === END OF AIRREPLY v1.0 — STAGE 1 ===                      ║
-# ║  All commands + handlers registered.                         ║
-# ║  Next: Stage 2 (quiz + wallet features).                     ║
+# ║  === END OF AIRREPLY v1.1 — STAGE 1 ===                      ║
 # ╚══════════════════════════════════════════════════════════════╝
