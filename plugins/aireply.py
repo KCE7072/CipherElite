@@ -495,6 +495,30 @@ async def _handle_button(event, data):
 #  SENDERS — log card + queue
 # ═══════════════════════════════════════════════════════════════
 
+@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+btntest$"))
+@rishabh()
+async def cmd_btntest(event):
+    if not await _is_owner(event):
+        return
+    try:
+        if not QUEUE_BOT or not QUEUE_BOT.is_connected():
+            return await _safe_reply(event, "❌ Queue bot offline")
+        buttons = [[
+            Button.inline("✅ Test1", b"ack"),
+            Button.inline("🚫 Test2", b"clear"),
+        ]]
+        sent = await QUEUE_BOT.send_message(
+            QUEUE_CHAT_ID,
+            "🧪 **Button test** — do you see buttons below?",
+            buttons=buttons
+        )
+        if sent:
+            await _safe_reply(event, f"✅ Test message sent (msg id: `{sent.id}`)\nCheck QUEUE.")
+        else:
+            await _safe_reply(event, "⚠️ Message returned None")
+    except Exception as e:
+        await _safe_reply(event, f"❌ btntest error: `{e}`")
+
 def build_reply_card(n, group_name, user_name, their_msg, bot_reply,
                      speed="normal", jump_link=None):
     header = (
@@ -713,6 +737,8 @@ async def cmd_diag(event):
         await _safe_reply(event, "\n".join(lines))
     except Exception as e:
         await _safe_reply(event, f"❌ Diag error: `{e}`")
+
+
 
 # ═══ END OF BATCH 3 ═══
 # ═══════════════════════════════════════════════════════════════
