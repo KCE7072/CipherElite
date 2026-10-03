@@ -117,7 +117,11 @@ def reset_daily_if_needed():
 
 def now_dict():
     n = datetime.utcnow()
-    return {"time12": n.strftime("%I:%M:%S %p"), "ts": n.timestamp()}
+    return {
+        "date": n.strftime("%Y-%m-%d"),
+        "time12": n.strftime("%I:%M:%S %p"),
+        "ts": n.timestamp()
+    }
 
 
 def is_whitelisted(chat_id):
