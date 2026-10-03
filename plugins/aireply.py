@@ -49,8 +49,7 @@ REACT_TO_GM = True
 REACT_PROBABILITY = 0.3
 REACTION_EMOJIS = ["🔥", "👀", "🫡", "💪", "😂"]
 
-GEMINI_MODEL = "gemini-3.7-flash"
-
+GEMINI_MODEL = "gemini-2.5-flash-lite"
 SYSTEM_PROMPT = """You are KCE — a real person in a crypto Telegram group.
 
 Write ONE short reply.
