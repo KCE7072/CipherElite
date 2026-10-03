@@ -1455,3 +1455,60 @@ except Exception as e:
 # ║  • Typing indicator (typing → pause → typing → send)        ║
 # ║  • Suspicious DM + reply-to-bot watchers                    ║
 # ╚══════════════════════════════════════════════════════════════╝
+
+
+# ═══ TEMP DIAG COMMAND — remove after debugging ═══
+
+@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+diag$"))
+@rishabh()
+async def cmd_diag(event):
+    if not await _is_owner(event):
+        return
+    try:
+        import os
+        lines = ["🔍 **KCE Diagnostics**", "━━━━━━━━━━━━━━━━━━━━"]
+
+        env_tok = os.getenv("KCE_QUEUE_BOT_TOKEN", "").strip()
+        if env_tok:
+            lines.append(f"✅ Env var: `{env_tok[:8]}...{env_tok[-4:]}`")
+        else:
+            lines.append("❌ Env var `KCE_QUEUE_BOT_TOKEN`: **empty**")
+
+        try:
+            if QUEUE_BOT_CONFIG_FILE.exists():
+                data = json.loads(QUEUE_BOT_CONFIG_FILE.read_text(encoding="utf-8"))
+                tok = data.get("token", "")
+                lines.append(f"✅ Config file: `{tok[:8]}...{tok[-4:]}`")
+            else:
+                lines.append("❌ Config file `queue_bot_config.json`: **not found**")
+        except Exception as e:
+            lines.append(f"❌ Config file error: `{e}`")
+
+        if QUEUE_BOT_TOKEN:
+            lines.append(f"✅ Module token: `{QUEUE_BOT_TOKEN[:8]}...{QUEUE_BOT_TOKEN[-4:]}`")
+        else:
+            lines.append("❌ Module token: **empty**")
+
+        if QUEUE_BOT:
+            conn = QUEUE_BOT.is_connected()
+            lines.append(f"🤖 Client: {'🟢 connected' if conn else '🔴 disconnected'}")
+        else:
+            lines.append("🤖 Client: **None** (never started)")
+
+        lines.append(f"⚙️ BOT_RUNNING: `{BOT_RUNNING}`")
+
+        suspects = {k: v for k, v in os.environ.items()
+                    if any(s in k.upper() for s in ("KCE", "BOT", "TOKEN", "QUEUE"))}
+        if suspects:
+            lines.append("")
+            lines.append(f"**Env vars matching ({len(suspects)}):**")
+            for k, v in suspects.items():
+                masked = v[:6] + "..." + v[-3:] if len(v) > 12 else "***"
+                lines.append(f"  `{k}` = `{masked}`")
+        else:
+            lines.append("")
+            lines.append("_(no KCE/BOT/TOKEN/QUEUE env vars visible)_")
+
+        await _safe_reply(event, "\n".join(lines))
+    except Exception as e:
+        await _safe_reply(event, f"❌ Diag error: `{e}`")
