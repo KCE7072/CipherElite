@@ -24,9 +24,9 @@ CATEGORY = "utilities"
 # ═══════════════════════════════════════════════════════════════
 
 import os
-GEMINI_API_KEY = ""
-AI_LOG_CHAT_ID = -1004374819145 # or 0 if no group yet
-QUEUE_CHAT_ID = -1003860044937 # or 0
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+AI_LOG_CHAT_ID = int(os.environ.get("AI_LOG_CHAT_ID", "0"))
+QUEUE_CHAT_ID = int(os.environ.get("QUEUE_CHAT_ID", "0"))
 
 # Trigger keywords
 KEYWORDS = ['gm', 'hi', 'hello', 'wagmi', 'moon', 'airdrop', 'lfg', 'wagmi fam']
