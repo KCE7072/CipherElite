@@ -1034,6 +1034,45 @@ async def cmd_kq_raw(event):
         await _safe_reply(event, f"**Status:** `{status}`\n\n**Full body:**\n{body[:1500]}")
     except Exception as e:
         await _safe_reply(event, f"❌ exception: `{e}`")
+        # ─── STARTUP DEBUG ───
+async def _startup_debug():
+    await asyncio.sleep(20)
+    print("=" * 50)
+    print("[quizhot-debug] STARTUP DIAGNOSTIC")
+    print(f"[quizhot-debug] GROQ_API_KEY set: {bool(GROQ_API_KEY)}")
+    if GROQ_API_KEY:
+        print(f"[quizhot-debug] key length: {len(GROQ_API_KEY)}")
+        print(f"[quizhot-debug] key prefix: {GROQ_API_KEY[:8]}")
+    print(f"[quizhot-debug] GROQ_MODEL: {GROQ_MODEL}")
+    print(f"[quizhot-debug] GROQ_URL: {GROQ_URL}")
+    print(f"[quizhot-debug] quiz groups: {DB.get('groups', [])}")
+    if GROQ_API_KEY:
+        try:
+            payload = {
+                "model": GROQ_MODEL,
+                "messages": [{"role": "user", "content": "say ok"}],
+                "max_tokens": 10,
+            }
+            headers = {
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            }
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(GROQ_URL, json=payload, headers=headers) as resp:
+                    status = resp.status
+                    body = await resp.text()
+            print(f"[quizhot-debug] Groq status: {status}")
+            print(f"[quizhot-debug] Groq body: {body[:600]}")
+        except Exception as e:
+            print(f"[quizhot-debug] exception: {type(e).__name__}: {e}")
+    print("=" * 50)
+
+
+try:
+    asyncio.create_task(_startup_debug())
+except Exception as e:
+    print(f"[quizhot-debug] init error: {e}")
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║  === END OF QUIZHOT v4.0 — GROQ EDITION ===                  ║
