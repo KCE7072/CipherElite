@@ -93,7 +93,7 @@ def _load_groq_key():
 
 GROQ_API_KEY = _load_groq_key()
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
-GROQ_MODEL = "llama-3.1-8b-instant"
+GROQ_MODEL = "openai/gpt-oss-20b"
 
 
 # ═══════════════════════════════════════════════════════════════
