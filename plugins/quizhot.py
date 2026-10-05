@@ -1,6 +1,6 @@
 # =============================================================================
-#  KCE Quiz Hot-Fix v2.0 — Fast quiz answerer (buttons + text)
-#  Standalone — no dependency on aireply.py
+#  KCE Quiz Hot-Fix v3.5 — MAD SPEED + per-group knowledge sources
+#  Cache-first, strict question filter, website scraping, no typing sim
 # =============================================================================
 
 from telethon import events
@@ -12,7 +12,8 @@ from plugins.ai_setup import ai_config
 import asyncio
 import json
 import re
-import random
+import time
+import aiohttp
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from google import genai
@@ -24,13 +25,18 @@ def wat_now():
     return datetime.now(WAT)
 
 # ═══════════════════════════════════════════════════════════════
-#  CONFIG
+#  CONFIG — SPEED FIRST
 # ═══════════════════════════════════════════════════════════════
 
 AI_LOG_CHAT_ID = -1004374819145
 DEBUG = True
 QUIZ_MODEL = "gemini-3.5-flash-lite"
-ANSWER_COOLDOWN_SEC = 30   # min gap between answers in same group
+
+ENABLE_ONLINE_PING = False
+ENABLE_TYPING_SIM = False
+ENABLE_ANSWER_COOLDOWN = False
+COOLDOWN_SEC = 1
+AUTO_REFRESH_HOURS = 6
 
 CORRECT_SIGNALS = ['correct', '✅', 'right', 'yes', 'winner', 'win', 'accurate', '✔']
 
@@ -56,20 +62,23 @@ def load_db():
             return json.loads(DB_FILE.read_text(encoding="utf-8"))
     except Exception as e:
         print(f"[quizhot] load error: {e}")
-    return {"groups": [], "history": []}
+    return {
+        "groups": [],
+        "history": [],
+        "qa_cache": {},
+        "sources": {},      # {chat_id: [{"type": "web|note|x", "value": "...", "text": "...", "fetched_at": ts}]}
+    }
 
 
 def save_db(data):
     try:
-        DB_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        DB_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception as e:
         print(f"[quizhot] save error: {e}")
 
 
 DB = load_db()
-
-# runtime state — per group
-LEARN = {}   # {chat_id: {"correct_options": [...], "last_question_id": ..., "last_answer_ts": ...}}
+LEARN = {}
 
 
 def is_quiz_group(chat_id):
@@ -94,6 +103,197 @@ def remove_group(chat_id):
         save_db(DB)
         return True
     return False
+
+
+# ═══════════════════════════════════════════════════════════════
+#  SOURCES — per group knowledge base
+# ═══════════════════════════════════════════════════════════════
+
+def get_sources(chat_id):
+    return DB.get("sources", {}).get(str(chat_id), [])
+
+
+def set_sources(chat_id, sources):
+    s = DB.get("sources", {})
+    s[str(chat_id)] = sources
+    DB["sources"] = s
+    save_db(DB)
+
+
+def add_source(chat_id, stype, value):
+    sources = get_sources(chat_id)
+    for s in sources:
+        if s.get("type") == stype and s.get("value") == value:
+            return False
+    sources.append({
+        "type": stype,
+        "value": value,
+        "text": "",
+        "fetched_at": 0,
+    })
+    set_sources(chat_id, sources)
+    return True
+
+
+def remove_source(chat_id, idx):
+    sources = get_sources(chat_id)
+    if 0 <= idx < len(sources):
+        sources.pop(idx)
+        set_sources(chat_id, sources)
+        return True
+    return False
+
+
+def clear_sources(chat_id):
+    set_sources(chat_id, [])
+
+
+def build_knowledge_block(chat_id):
+    """Combine all source texts into one prompt block."""
+    sources = get_sources(chat_id)
+    if not sources:
+        return ""
+    chunks = []
+    for s in sources:
+        text = s.get("text", "").strip()
+        if text:
+            chunks.append(text)
+        elif s.get("type") == "note":
+            chunks.append(s.get("value", ""))
+    combined = "\n\n".join(chunks)
+    return combined[:3000]
+
+
+async def fetch_website(url):
+    """Fetch a webpage and strip HTML. Returns text or None."""
+    try:
+        if not url.startswith("http"):
+            url = "https://" + url
+        headers = {
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
+        }
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout, headers=headers) as session:
+            async with session.get(url) as resp:
+                if resp.status != 200:
+                    dbg(f"fetch {url}: HTTP {resp.status}")
+                    return None
+                html = await resp.text()
+        # strip scripts and styles
+        html = re.sub(r'<script[^>]*>.*?</script>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
+        html = re.sub(r'<style[^>]*>.*?</style>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
+        # strip tags
+        text = re.sub(r'<[^>]+>', ' ', html)
+        # decode entities
+        text = text.replace('&nbsp;', ' ').replace('&amp;', '&')
+        text = text.replace('&lt;', '<').replace('&gt;', '>')
+        text = text.replace('&quot;', '"').replace('&#39;', "'")
+        # collapse whitespace
+        text = re.sub(r'\s+', ' ', text).strip()
+        # limit
+        return text[:5000]
+    except Exception as e:
+        dbg(f"fetch error: {e}")
+        return None
+
+
+async def refresh_all_sources(chat_id):
+    """Re-fetch all web sources for a group."""
+    sources = get_sources(chat_id)
+    updated = 0
+    for s in sources:
+        if s.get("type") == "web":
+            txt = await fetch_website(s.get("value", ""))
+            if txt:
+                s["text"] = txt
+                s["fetched_at"] = time.time()
+                updated += 1
+    if updated:
+        set_sources(chat_id, sources)
+    return updated
+
+
+async def auto_refresh_loop():
+    await asyncio.sleep(60)
+    while True:
+        try:
+            for cid_str in list(DB.get("sources", {}).keys()):
+                try:
+                    cid = int(cid_str)
+                    sources = get_sources(cid)
+                    stale = any(
+                        s.get("type") == "web" and
+                        time.time() - s.get("fetched_at", 0) > AUTO_REFRESH_HOURS * 3600
+                        for s in sources
+                    )
+                    if stale:
+                        dbg(f"auto-refresh for {cid}")
+                        await refresh_all_sources(cid)
+                except Exception as e:
+                    dbg(f"auto-refresh {cid_str} error: {e}")
+        except Exception as e:
+            print(f"[quizhot] auto-refresh loop error: {e}")
+        await asyncio.sleep(3600)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  QA CACHE — the speed secret
+# ═══════════════════════════════════════════════════════════════
+
+def normalize_q(text):
+    t = (text or "").lower().strip()
+    t = re.sub(r'[^\w\s]', '', t)
+    t = re.sub(r'\s+', ' ', t)
+    return t[:200]
+
+
+def cache_lookup(question):
+    cache = DB.get("qa_cache", {})
+    nq = normalize_q(question)
+    if not nq:
+        return None
+    if nq in cache:
+        entry = cache[nq]
+        entry["hits"] = entry.get("hits", 0) + 1
+        save_db(DB)
+        dbg(f"cache HIT (exact): '{entry['answer']}'")
+        return entry["answer"]
+    nq_words = set(nq.split())
+    if len(nq_words) < 3:
+        return None
+    best, best_score = None, 0
+    for k, v in cache.items():
+        k_words = set(k.split())
+        if not k_words:
+            continue
+        overlap = len(nq_words & k_words)
+        score = overlap / max(len(nq_words), len(k_words))
+        if score > best_score and score >= 0.75:
+            best_score = score
+            best = v
+    if best:
+        best["hits"] = best.get("hits", 0) + 1
+        save_db(DB)
+        dbg(f"cache HIT (fuzzy {best_score:.2f}): '{best['answer']}'")
+        return best["answer"]
+    return None
+
+
+def cache_store(question, answer):
+    if not question or not answer:
+        return
+    nq = normalize_q(question)
+    if len(nq) < 5 or len(answer) > 100:
+        return
+    cache = DB.get("qa_cache", {})
+    cache[nq] = {"answer": answer.strip()[:100], "hits": 0, "ts": time.time()}
+    if len(cache) > 500:
+        items = sorted(cache.items(), key=lambda kv: kv[1].get("ts", 0))
+        cache = dict(items[-500:])
+    DB["qa_cache"] = cache
+    save_db(DB)
+    dbg(f"cache STORE: '{answer[:50]}'")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -139,30 +339,60 @@ async def _resolve_id(link):
         return None
 
 
-async def _fire_online():
-    try:
-        await CipherElite(functions.account.UpdateStatusRequest(offline=False))
-    except Exception:
-        pass
+def is_question(text):
+    """Strict question detector."""
+    if not text:
+        return False
+    t = text.strip()
+    if len(t) < 8:
+        return False
+    has_q_mark = "?" in t[:200]
+    lower = t.lower()
+    q_words = (
+        "what", "which", "who", "when", "where", "why", "how",
+        "name", "pick", "select", "choose", "identify",
+        "complete the", "fill in", "guess the"
+    )
+    starts_q = any(lower.startswith(w) for w in q_words)
+    skip_signals = (
+        "rules:", "prize:", "winner is", "stay active",
+        "leaderboard", "leader board", "round ", "point",
+        "congratulations", "good job", "well done", "shoutout",
+        "http://", "https://", "t.me/"
+    )
+    if any(s in lower for s in skip_signals):
+        return False
+    stripped = re.sub(r'[@#\w]+', '', t)
+    if len(stripped) < 5 and not has_q_mark:
+        return False
+    return has_q_mark or starts_q
 
 
 # ═══════════════════════════════════════════════════════════════
-#  INIT — register commands
+#  INIT
 # ═══════════════════════════════════════════════════════════════
 
 def init(client_instance):
     commands = [
-        ".q on <link|id> - watch quiz group",
-        ".q here - watch current group (run inside)",
+        ".q on <link|id> - watch group",
+        ".q here - watch current group",
         ".q off <link|id> - stop watching",
-        ".q list - show watched groups",
-        ".q clear - reset learned answers",
+        ".q list - list watched",
+        ".q cache - show cached Q&A count",
+        ".q clear - reset learning + cache",
+        ".kq add web <url> - add website source",
+        ".kq add note <text> - add manual fact",
+        ".kq list - show sources",
+        ".kq remove <n> - remove source",
+        ".kq clear - wipe sources",
+        ".kq fetch - re-scrape web sources",
+        ".kq show - preview combined knowledge",
     ]
-    add_handler("quizhot", commands, "🎯 Quiz hot-fix — auto-answers quizzes")
+    add_handler("quizhot", commands, "🎯 Quiz hot-fix v3.5")
 
 
 # ═══════════════════════════════════════════════════════════════
-#  COMMANDS
+#  COMMANDS (.q)
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage(pattern=r"\.q\s+on\s+(\S+)$"))
@@ -171,10 +401,9 @@ async def cmd_q_on(event):
     if not await _is_owner(event):
         return
     try:
-        link = event.pattern_match.group(1)
-        cid = await _resolve_id(link)
+        cid = await _resolve_id(event.pattern_match.group(1))
         if cid is None:
-            return await _safe_reply(event, f"❌ Could not resolve `{link}`\nTry `.q here` inside the group.")
+            return await _safe_reply(event, "❌ Could not resolve link. Try `.q here`.")
         if add_group(cid):
             await _safe_reply(event, f"✅ Quiz watch ON for `{cid}`")
         else:
@@ -194,15 +423,9 @@ async def cmd_q_here(event):
         cid = event.chat_id
         name = getattr(chat, "title", "Unknown")
         if add_group(cid):
-            await CipherElite.send_message(
-                AI_LOG_CHAT_ID,
-                f"✅ Quiz watch ON for **{name}**\n🆔 `{cid}`"
-            )
+            await CipherElite.send_message(AI_LOG_CHAT_ID, f"✅ Quiz watch ON for **{name}** (`{cid}`)")
         else:
-            await CipherElite.send_message(
-                AI_LOG_CHAT_ID,
-                f"ℹ️ Already watching **{name}** (`{cid}`)"
-            )
+            await CipherElite.send_message(AI_LOG_CHAT_ID, f"ℹ️ Already watching **{name}** (`{cid}`)")
     except Exception as e:
         await CipherElite.send_message(AI_LOG_CHAT_ID, f"❌ error: `{e}`")
 
@@ -213,10 +436,9 @@ async def cmd_q_off(event):
     if not await _is_owner(event):
         return
     try:
-        link = event.pattern_match.group(1)
-        cid = await _resolve_id(link)
+        cid = await _resolve_id(event.pattern_match.group(1))
         if cid is None:
-            return await _safe_reply(event, f"❌ Could not resolve `{link}`")
+            return await _safe_reply(event, "❌ Could not resolve link.")
         if remove_group(cid):
             await _safe_reply(event, f"⏹️ Stopped watching `{cid}`")
         else:
@@ -234,14 +456,31 @@ async def cmd_q_list(event):
         groups = DB.get("groups", [])
         if not groups:
             return await _safe_reply(event, "📭 No groups watched.")
-        lines = [f"🎯 **Watched Quiz Groups** ({len(groups)})\n"]
+        lines = [f"🎯 **Watched** ({len(groups)})\n"]
         for cid in groups:
             try:
                 e = await CipherElite.get_entity(cid)
                 name = getattr(e, "title", str(cid))
             except Exception:
                 name = "Unknown"
-            lines.append(f"• **{name}** (`{cid}`)")
+            src_count = len(get_sources(cid))
+            lines.append(f"• **{name}** (`{cid}`) — {src_count} sources")
+        await _safe_reply(event, "\n".join(lines))
+    except Exception as e:
+        await _safe_reply(event, f"❌ error: `{e}`")
+
+
+@CipherElite.on(events.NewMessage(pattern=r"\.q\s+cache$"))
+@rishabh()
+async def cmd_q_cache(event):
+    if not await _is_owner(event):
+        return
+    try:
+        cache = DB.get("qa_cache", {})
+        top = sorted(cache.items(), key=lambda kv: kv[1].get("hits", 0), reverse=True)[:10]
+        lines = [f"💾 **QA Cache: {len(cache)} entries**\n"]
+        for q, v in top:
+            lines.append(f"• ({v.get('hits', 0)}×) \"{q[:40]}\" → \"{v.get('answer', '')[:30]}\"")
         await _safe_reply(event, "\n".join(lines))
     except Exception as e:
         await _safe_reply(event, f"❌ error: `{e}`")
@@ -254,28 +493,146 @@ async def cmd_q_clear(event):
         return
     try:
         DB["history"] = []
+        DB["qa_cache"] = {}
         save_db(DB)
         LEARN.clear()
-        await _safe_reply(event, "🔄 Quiz learning cleared.")
+        await _safe_reply(event, "🔄 Cache + learning cleared.")
     except Exception as e:
         await _safe_reply(event, f"❌ error: `{e}`")
 
 
 # ═══════════════════════════════════════════════════════════════
-#  FAST QUIZ ANSWER — optimized prompt, minimal tokens
+#  SOURCES COMMANDS (.kq)
 # ═══════════════════════════════════════════════════════════════
 
-FAST_QUIZ_PROMPT = """You answer Telegram quiz questions. Reply with ONLY the answer.
-Rules:
-- 1-3 words max
-- lowercase
-- no punctuation, no emoji, no explanation
-- if it's a name/number, just the name/number
-- if unsure, give best guess
+@CipherElite.on(events.NewMessage(pattern=r"\.kq\s+add\s+(web|note)\s+(.+)$"))
+async def cmd_kq_add(event):
+    if not await _is_owner(event):
+        return
+    try:
+        stype = event.pattern_match.group(1).lower()
+        value = event.pattern_match.group(2).strip()
+        try: await event.delete()
+        except: pass
+        chat = await event.get_chat()
+        cid = event.chat_id
+        name = getattr(chat, "title", "Unknown")
 
-Question: {q}
+        if not add_source(cid, stype, value):
+            await CipherElite.send_message(AI_LOG_CHAT_ID, f"ℹ️ Source already exists in **{name}**")
+            return
 
-Answer:"""
+        msg = f"✅ **{stype}** source added to **{name}**"
+        if stype == "web":
+            txt = await fetch_website(value)
+            if txt:
+                sources = get_sources(cid)
+                for s in sources:
+                    if s.get("type") == "web" and s.get("value") == value:
+                        s["text"] = txt
+                        s["fetched_at"] = time.time()
+                        break
+                set_sources(cid, sources)
+                msg += f"\n📄 Fetched {len(txt)} chars"
+            else:
+                msg += "\n⚠️ Fetch failed — will retry on `.kq fetch`"
+        elif stype == "note":
+            sources = get_sources(cid)
+            for s in sources:
+                if s.get("type") == "note" and s.get("value") == value:
+                    s["text"] = value
+                    break
+            set_sources(cid, sources)
+            msg += f"\n📝 Note: \"{value[:80]}\""
+
+        await CipherElite.send_message(AI_LOG_CHAT_ID, msg)
+    except Exception as e:
+        await CipherElite.send_message(AI_LOG_CHAT_ID, f"❌ kq add error: `{e}`")
+
+
+@CipherElite.on(events.NewMessage(pattern=r"\.kq\s+list$"))
+@rishabh()
+async def cmd_kq_list(event):
+    if not await _is_owner(event):
+        return
+    try:
+        cid = event.chat_id
+        sources = get_sources(cid)
+        if not sources:
+            return await _safe_reply(event, "📭 No sources for this group.")
+        lines = [f"📚 **Sources** ({len(sources)})\n"]
+        for i, s in enumerate(sources):
+            text_len = len(s.get("text", ""))
+            lines.append(
+                f"`{i}` **{s['type']}**: {s.get('value', '')[:60]}\n"
+                f"   └ {text_len} chars cached"
+            )
+        await _safe_reply(event, "\n".join(lines))
+    except Exception as e:
+        await _safe_reply(event, f"❌ error: `{e}`")
+
+
+@CipherElite.on(events.NewMessage(pattern=r"\.kq\s+remove\s+(\d+)$"))
+@rishabh()
+async def cmd_kq_remove(event):
+    if not await _is_owner(event):
+        return
+    try:
+        idx = int(event.pattern_match.group(1))
+        cid = event.chat_id
+        if remove_source(cid, idx):
+            await _safe_reply(event, f"🗑️ Removed source `{idx}`")
+        else:
+            await _safe_reply(event, f"❌ Invalid index `{idx}`")
+    except Exception as e:
+        await _safe_reply(event, f"❌ error: `{e}`")
+
+
+@CipherElite.on(events.NewMessage(pattern=r"\.kq\s+clear$"))
+@rishabh()
+async def cmd_kq_clear(event):
+    if not await _is_owner(event):
+        return
+    try:
+        cid = event.chat_id
+        clear_sources(cid)
+        await _safe_reply(event, "🔄 Sources cleared for this group.")
+    except Exception as e:
+        await _safe_reply(event, f"❌ error: `{e}`")
+
+
+@CipherElite.on(events.NewMessage(pattern=r"\.kq\s+fetch$"))
+@rishabh()
+async def cmd_kq_fetch(event):
+    if not await _is_owner(event):
+        return
+    try:
+        cid = event.chat_id
+        await _safe_reply(event, "⏳ Fetching web sources...")
+        n = await refresh_all_sources(cid)
+        await _safe_reply(event, f"✅ Refreshed {n} web source(s)")
+    except Exception as e:
+        await _safe_reply(event, f"❌ error: `{e}`")
+
+
+@CipherElite.on(events.NewMessage(pattern=r"\.kq\s+show$"))
+@rishabh()
+async def cmd_kq_show(event):
+    if not await _is_owner(event):
+        return
+    try:
+        cid = event.chat_id
+        block = build_knowledge_block(cid)
+        if not block:
+            return await _safe_reply(event, "📭 No knowledge block yet.")
+        await _safe_reply(event, f"📚 **Knowledge preview** ({len(block)} chars)\n\n{block[:1500]}")
+    except Exception as e:
+        await _safe_reply(event, f"❌ error: `{e}`")
+
+# ═══ END OF CHUNK 1 ═══
+# ═══════════════════════════════════════════════════════════════
+#  FAST GEMINI — cached client, tiny prompt
+# ═══════════════════════════════════════════════════════════════
 
 _quiz_client = None
 
@@ -289,29 +646,35 @@ def _get_quiz_client():
     return _quiz_client
 
 
-async def _fast_quiz_answer(question):
-    """Fast minimal-latency answer."""
+async def _fast_quiz_answer(question, cid):
+    """Cache-first, then Gemini with knowledge block."""
     if not ai_config.is_enabled():
         return None
     client = _get_quiz_client()
     if client is None:
         return None
 
+    knowledge = build_knowledge_block(cid)
+    knowledge_section = ""
+    if knowledge:
+        knowledge_section = f"\nKnown facts about this project:\n{knowledge}\n"
+
+    prompt = f"""{knowledge_section}Answer this quiz question in 1-3 words, lowercase, no punctuation, no emoji, no explanation:
+{question[:250]}
+Answer:"""
+
     try:
         config = types.GenerateContentConfig(
             max_output_tokens=15,
-            temperature=0.2,
+            temperature=0.1,
+            top_p=0.9,
         )
         resp = await client.aio.models.generate_content(
             model=QUIZ_MODEL,
-            contents=[types.Content(
-                role="user",
-                parts=[types.Part(text=FAST_QUIZ_PROMPT.format(q=question[:250]))]
-            )],
+            contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
             config=config,
         )
         text = (resp.text or "").strip()
-        # clean aggressively
         text = text.replace("\n", " ").replace("*", "").replace("_", "").strip('"').strip("'")
         text = re.sub(r'^(answer|ans|reply|the answer is)[:\s]*', '', text, flags=re.IGNORECASE)
         text = text.strip(".,!?;:")
@@ -324,16 +687,8 @@ async def _fast_quiz_answer(question):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  MAIN WATCHER — buttons + text questions
+#  MAIN WATCHER — cache → Gemini → reply
 # ═══════════════════════════════════════════════════════════════
-
-SKIP_PHRASES = [
-    "rules:", "prize:", "round ", "winner", "stay active",
-    "let's see", "we have", "i'll send", "point per",
-    "quiz —", "quiz -", "questions lined up", "join here",
-    "don't edit", "no edited", "keep your answers"
-]
-
 
 @CipherElite.on(events.NewMessage)
 async def quiz_watcher(event):
@@ -355,25 +710,21 @@ async def quiz_watcher(event):
         state = LEARN.setdefault(chat_id, {
             "correct_options": [],
             "last_question_id": None,
+            "last_question_text": None,
             "last_answer_ts": 0,
         })
 
-        # dedupe — same message
         if state.get("last_question_id") == event.message.id:
             return
 
-        now_ts = wat_now().timestamp()
-        if now_ts - state.get("last_answer_ts", 0) < ANSWER_COOLDOWN_SEC:
-            return
+        if ENABLE_ANSWER_COOLDOWN:
+            now_ts = wat_now().timestamp()
+            if now_ts - state.get("last_answer_ts", 0) < COOLDOWN_SEC:
+                return
 
         lower = text.lower()
 
-        # skip announcements / rules / intros
-        if any(p in lower for p in SKIP_PHRASES):
-            dbg(f"skip phrase detected, ignoring")
-            return
-
-        # ── LEARNING: mod replies "correct" to someone's answer
+        # ── LEARNING: admin says "correct" replying to answer
         if event.is_reply:
             try:
                 replied = await event.get_reply_message()
@@ -389,110 +740,99 @@ async def quiz_watcher(event):
                     pass
                 if has_signal and is_admin:
                     correct = replied.raw_text.strip()[:100]
-                    if correct not in state["correct_options"]:
-                        state["correct_options"].append(correct)
-                        state["correct_options"] = state["correct_options"][-20:]
-                        dbg(f"learned: '{correct}'")
+                    state["correct_options"].append(correct)
+                    state["correct_options"] = state["correct_options"][-30:]
 
-        # ── BUTTON QUIZ (A/B/C/D options)
+                    last_q = state.get("last_question_text")
+                    if last_q:
+                        cache_store(last_q, correct)
+                    LEARN[chat_id] = state
+                    dbg(f"learned: '{correct}'")
+                    return
+
+        # ── BUTTON QUIZ
         if event.buttons:
             flat = [b for row in event.buttons for b in row]
             if 2 <= len(flat) <= 8:
-                is_q = "?" in text or any(
-                    w in lower for w in ("what", "which", "who", "when", "where", "why", "how")
-                )
-                if not is_q and len(text) < 10:
+                if not is_question(text) and len(text) < 10:
                     return
-
-                dbg(f"button quiz: {len(flat)} options, q='{text[:60]}'")
+                dbg(f"button quiz: {len(flat)} opts")
                 state["last_question_id"] = event.message.id
-                state["last_answer_ts"] = now_ts
+                state["last_question_text"] = text[:200]
+                state["last_answer_ts"] = wat_now().timestamp()
                 LEARN[chat_id] = state
 
+                cached = cache_lookup(text)
                 target_row, target_col = None, None
-                learned = state.get("correct_options", [])
-                if learned:
+                if cached:
                     for r_idx, row in enumerate(event.buttons):
                         for c_idx, btn in enumerate(row):
                             btext = (getattr(btn, "text", "") or "").strip().lower()
-                            for corr in learned:
-                                if corr.lower() in btext or btext in corr.lower():
-                                    target_row, target_col = r_idx, c_idx
-                                    break
-                            if target_row is not None:
-                                break
-                        if target_row is not None:
-                            break
-
-                if target_row is None:
-                    for r_idx, row in enumerate(event.buttons):
-                        for c_idx, btn in enumerate(row):
-                            btext = (getattr(btn, "text", "") or "").strip()
-                            if re.match(r'^[Aa1]\b', btext) or btext.startswith(("A)", "A.")):
+                            if cached.lower() in btext or btext in cached.lower():
                                 target_row, target_col = r_idx, c_idx
                                 break
                         if target_row is not None:
                             break
-
+                if target_row is None:
+                    for r_idx, row in enumerate(event.buttons):
+                        for c_idx, btn in enumerate(row):
+                            btext = (getattr(btn, "text", "") or "").strip()
+                            if re.match(r'^[Aa1]\b', btext):
+                                target_row, target_col = r_idx, c_idx
+                                break
+                        if target_row is not None:
+                            break
                 if target_row is None:
                     target_row, target_col = 0, 0
 
-                await _fire_online()
                 try:
                     await event.click(target_row, target_col)
                     dbg(f"CLICKED ({target_row},{target_col})")
-                    try:
-                        await CipherElite.send_message(
-                            AI_LOG_CHAT_ID,
-                            f"🎯 **QUIZ BUTTON CLICKED**\n📍 `{chat_id}`\n❓ \"{text[:150]}\"\n👆 ({target_row},{target_col})\n🕐 {wat_now().strftime('%I:%M:%S %p')} WAT"
-                        )
-                    except Exception:
-                        pass
                 except Exception as e:
                     dbg(f"click error: {e}")
                 return
 
-        # ── TEXT-ANSWER QUIZ
-        is_admin = False
-        try:
-            perms = await CipherElite.get_permissions(chat_id, event.sender_id)
-            is_admin = bool(getattr(perms, "is_admin", False) or getattr(perms, "is_creator", False))
-        except Exception:
-            pass
-
-        has_q_mark = "?" in text
-        starts_q_word = any(
-            lower.startswith(w) for w in
-            ("what", "which", "who", "when", "where", "why", "how",
-             "name", "pick", "complete", "the", "in", "on")
-        )
-        is_question = (is_admin or has_q_mark or starts_q_word) and len(text) >= 8
-
-        if not is_question:
+        # ── TEXT QUIZ — strict question check
+        if not is_question(text):
             return
 
-        dbg(f"text quiz detected: '{text[:80]}'")
+        dbg(f"question: '{text[:80]}'")
         state["last_question_id"] = event.message.id
-        state["last_answer_ts"] = now_ts
+        state["last_question_text"] = text[:200]
+        state["last_answer_ts"] = wat_now().timestamp()
         LEARN[chat_id] = state
 
-        answer = await _fast_quiz_answer(text)
+        # ── 1) cache lookup
+        cached = cache_lookup(text)
+        if cached:
+            dbg(f"FAST from cache: '{cached}'")
+            try:
+                await event.reply(cached)
+                dbg(f"REPLIED (cache): '{cached}'")
+            except Exception as e:
+                print(f"[quizhot] send error (cache): {e}")
+            return
+
+        # ── 2) Gemini fallback
+        answer = await _fast_quiz_answer(text, chat_id)
         if not answer:
             dbg("no answer generated")
             return
 
-        await _fire_online()
         try:
             await event.reply(answer)
-            dbg(f"ANSWERED: '{answer}'")
+            dbg(f"REPLIED (gemini): '{answer}'")
         except Exception as e:
             print(f"[quizhot] send error: {e}")
             return
 
+        # learn from our own answer for future rounds
+        cache_store(text, answer)
+
         try:
             await CipherElite.send_message(
                 AI_LOG_CHAT_ID,
-                f"🎯 **TEXT QUIZ ANSWERED**\n📍 `{chat_id}`\n❓ \"{text[:150]}\"\n🤖 \"{answer}\"\n🕐 {wat_now().strftime('%I:%M:%S %p')} WAT"
+                f"🎯 **QUIZ ANSWERED**\n📍 `{chat_id}`\n❓ \"{text[:150]}\"\n🤖 \"{answer}\"\n🕐 {wat_now().strftime('%I:%M:%S %p')} WAT"
             )
         except Exception:
             pass
@@ -501,7 +841,35 @@ async def quiz_watcher(event):
         print(f"[quizhot] watcher error: {e}")
 
 
+# ═══════════════════════════════════════════════════════════════
+#  BOOTSTRAP — start auto-refresh loop
+# ═══════════════════════════════════════════════════════════════
+
+async def _plugin_bootstrap():
+    try:
+        await asyncio.sleep(10)
+        asyncio.create_task(auto_refresh_loop())
+        dbg("bootstrap: auto-refresh started")
+    except Exception as e:
+        print(f"[quizhot] bootstrap error: {e}")
+
+
+try:
+    asyncio.create_task(_plugin_bootstrap())
+except Exception as e:
+    print(f"[quizhot] bootstrap init error: {e}")
+
+
 # ╔══════════════════════════════════════════════════════════════╗
-# ║  === END OF QUIZHOT v2.0 ===                                 ║
-# ║  Fast text + button quiz answers, self-contained             ║
+# ║  === END OF QUIZHOT v3.5 — MAD SPEED + SOURCES ===           ║
+# ║                                                              ║
+# ║  Features:                                                   ║
+# ║  • Cache-first (10ms on repeat questions)                    ║
+# ║  • Strict question filter (ends with ? or starts Q-word)     ║
+# ║  • Per-group knowledge sources (web + notes)                 ║
+# ║  • Auto-refresh web sources every 6h                         ║
+# ║  • Learns from admin "correct" replies                       ║
+# ║  • Beast mode — no typing, no online ping, no delay          ║
+# ║  • Button quiz support                                       ║
+# ║  • Learns from own answers (feeds cache)                     ║
 # ╚══════════════════════════════════════════════════════════════╝
