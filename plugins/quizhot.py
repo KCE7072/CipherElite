@@ -1008,6 +1008,32 @@ async def cmd_kq_models(event):
         await _safe_reply(event, f"**Available models ({len(ids)}):**\n\n" + "\n".join(f"`{i}`" for i in ids))
     except Exception as e:
         await _safe_reply(event, f"❌ error: `{e}`")
+        @CipherElite.on(events.NewMessage(pattern=r"\.kq\s+raw$"))
+@rishabh()
+async def cmd_kq_raw(event):
+    if not await _is_owner(event):
+        return
+    try:
+        if not GROQ_API_KEY:
+            return await _safe_reply(event, "❌ no key")
+        await _safe_reply(event, f"**Model:** `{GROQ_MODEL}`\n**Key:** `{GROQ_API_KEY[:10]}...{GROQ_API_KEY[-4:]}`\n\nSending test...")
+        payload = {
+            "model": GROQ_MODEL,
+            "messages": [{"role": "user", "content": "reply with the word OK"}],
+            "max_tokens": 10,
+        }
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(GROQ_URL, json=payload, headers=headers) as resp:
+                status = resp.status
+                body = await resp.text()
+        await _safe_reply(event, f"**Status:** `{status}`\n\n**Full body:**\n{body[:1500]}")
+    except Exception as e:
+        await _safe_reply(event, f"❌ exception: `{e}`")
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║  === END OF QUIZHOT v4.0 — GROQ EDITION ===                  ║
