@@ -1,6 +1,5 @@
 # =============================================================================
-#  KCE Quiz Hot-Fix v3.5 — MAD SPEED + per-group knowledge sources
-#  Cache-first, strict question filter, website scraping, no typing sim
+#  KCE Quiz Hot-Fix v4.0 — GROQ + cache + sources + MAD SPEED
 # =============================================================================
 
 from telethon import events
@@ -25,7 +24,7 @@ def wat_now():
     return datetime.now(WAT)
 
 # ═══════════════════════════════════════════════════════════════
-#  CONFIG — SPEED FIRST
+#  CONFIG
 # ═══════════════════════════════════════════════════════════════
 
 AI_LOG_CHAT_ID = -1004374819145
@@ -54,6 +53,7 @@ PROJECT_ROOT = Path(__file__).parent.parent
 DB_DIR = PROJECT_ROOT / "DB"
 DB_DIR.mkdir(exist_ok=True)
 DB_FILE = DB_DIR / "quizhot.json"
+GROQ_CONFIG_FILE = DB_DIR / "groq_config.json"
 
 
 def load_db():
@@ -66,7 +66,7 @@ def load_db():
         "groups": [],
         "history": [],
         "qa_cache": {},
-        "sources": {},      # {chat_id: [{"type": "web|note|x", "value": "...", "text": "...", "fetched_at": ts}]}
+        "sources": {},
     }
 
 
@@ -80,6 +80,25 @@ def save_db(data):
 DB = load_db()
 LEARN = {}
 
+
+def _load_groq_key():
+    try:
+        if GROQ_CONFIG_FILE.exists():
+            data = json.loads(GROQ_CONFIG_FILE.read_text(encoding="utf-8"))
+            return data.get("key", "").strip()
+    except Exception as e:
+        print(f"[quizhot] groq config load error: {e}")
+    return ""
+
+
+GROQ_API_KEY = _load_groq_key()
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+GROQ_MODEL = "openai/gpt-oss-20b"
+
+
+# ═══════════════════════════════════════════════════════════════
+#  GROUP MGMT
+# ═══════════════════════════════════════════════════════════════
 
 def is_quiz_group(chat_id):
     return chat_id in DB.get("groups", [])
@@ -106,7 +125,7 @@ def remove_group(chat_id):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  SOURCES — per group knowledge base
+#  SOURCES
 # ═══════════════════════════════════════════════════════════════
 
 def get_sources(chat_id):
@@ -149,7 +168,6 @@ def clear_sources(chat_id):
 
 
 def build_knowledge_block(chat_id):
-    """Combine all source texts into one prompt block."""
     sources = get_sources(chat_id)
     if not sources:
         return ""
@@ -160,12 +178,10 @@ def build_knowledge_block(chat_id):
             chunks.append(text)
         elif s.get("type") == "note":
             chunks.append(s.get("value", ""))
-    combined = "\n\n".join(chunks)
-    return combined[:3000]
+    return "\n\n".join(chunks)[:3000]
 
 
 async def fetch_website(url):
-    """Fetch a webpage and strip HTML. Returns text or None."""
     try:
         if not url.startswith("http"):
             url = "https://" + url
@@ -180,18 +196,13 @@ async def fetch_website(url):
                     dbg(f"fetch {url}: HTTP {resp.status}")
                     return None
                 html = await resp.text()
-        # strip scripts and styles
         html = re.sub(r'<script[^>]*>.*?</script>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
         html = re.sub(r'<style[^>]*>.*?</style>', ' ', html, flags=re.DOTALL | re.IGNORECASE)
-        # strip tags
         text = re.sub(r'<[^>]+>', ' ', html)
-        # decode entities
         text = text.replace('&nbsp;', ' ').replace('&amp;', '&')
         text = text.replace('&lt;', '<').replace('&gt;', '>')
         text = text.replace('&quot;', '"').replace('&#39;', "'")
-        # collapse whitespace
         text = re.sub(r'\s+', ' ', text).strip()
-        # limit
         return text[:5000]
     except Exception as e:
         dbg(f"fetch error: {e}")
@@ -199,7 +210,6 @@ async def fetch_website(url):
 
 
 async def refresh_all_sources(chat_id):
-    """Re-fetch all web sources for a group."""
     sources = get_sources(chat_id)
     updated = 0
     for s in sources:
@@ -238,7 +248,7 @@ async def auto_refresh_loop():
 
 
 # ═══════════════════════════════════════════════════════════════
-#  QA CACHE — the speed secret
+#  QA CACHE
 # ═══════════════════════════════════════════════════════════════
 
 def normalize_q(text):
@@ -340,7 +350,6 @@ async def _resolve_id(link):
 
 
 def is_question(text):
-    """Strict question detector."""
     if not text:
         return False
     t = text.strip()
@@ -378,21 +387,24 @@ def init(client_instance):
         ".q here - watch current group",
         ".q off <link|id> - stop watching",
         ".q list - list watched",
-        ".q cache - show cached Q&A count",
-        ".q clear - reset learning + cache",
+        ".q cache - show cached Q&A",
+        ".q clear - reset cache",
+        ".q learn \"q\" \"a\" - pre-cache Q&A",
         ".kq add web <url> - add website source",
         ".kq add note <text> - add manual fact",
         ".kq list - show sources",
         ".kq remove <n> - remove source",
         ".kq clear - wipe sources",
-        ".kq fetch - re-scrape web sources",
-        ".kq show - preview combined knowledge",
+        ".kq fetch - re-scrape web",
+        ".kq show - preview knowledge",
+        ".kq setgroq <key> - save Groq API key",
+        ".kq groqtest - test Groq",
     ]
-    add_handler("quizhot", commands, "🎯 Quiz hot-fix v3.5")
+    add_handler("quizhot", commands, "🎯 Quiz v4.0 — Groq + cache + sources")
 
-
+# ═══ END OF CHUNK 1 ═══
 # ═══════════════════════════════════════════════════════════════
-#  COMMANDS (.q)
+#  .q COMMANDS
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage(pattern=r"\.q\s+on\s+(\S+)$"))
@@ -403,7 +415,7 @@ async def cmd_q_on(event):
     try:
         cid = await _resolve_id(event.pattern_match.group(1))
         if cid is None:
-            return await _safe_reply(event, "❌ Could not resolve link. Try `.q here`.")
+            return await _safe_reply(event, "❌ Could not resolve. Try `.q here`.")
         if add_group(cid):
             await _safe_reply(event, f"✅ Quiz watch ON for `{cid}`")
         else:
@@ -423,9 +435,9 @@ async def cmd_q_here(event):
         cid = event.chat_id
         name = getattr(chat, "title", "Unknown")
         if add_group(cid):
-            await CipherElite.send_message(AI_LOG_CHAT_ID, f"✅ Quiz watch ON for **{name}** (`{cid}`)")
+            await CipherElite.send_message(AI_LOG_CHAT_ID, f"✅ Quiz ON for **{name}** (`{cid}`)")
         else:
-            await CipherElite.send_message(AI_LOG_CHAT_ID, f"ℹ️ Already watching **{name}** (`{cid}`)")
+            await CipherElite.send_message(AI_LOG_CHAT_ID, f"ℹ️ Already watching **{name}**")
     except Exception as e:
         await CipherElite.send_message(AI_LOG_CHAT_ID, f"❌ error: `{e}`")
 
@@ -438,7 +450,7 @@ async def cmd_q_off(event):
     try:
         cid = await _resolve_id(event.pattern_match.group(1))
         if cid is None:
-            return await _safe_reply(event, "❌ Could not resolve link.")
+            return await _safe_reply(event, "❌ Could not resolve.")
         if remove_group(cid):
             await _safe_reply(event, f"⏹️ Stopped watching `{cid}`")
         else:
@@ -463,8 +475,7 @@ async def cmd_q_list(event):
                 name = getattr(e, "title", str(cid))
             except Exception:
                 name = "Unknown"
-            src_count = len(get_sources(cid))
-            lines.append(f"• **{name}** (`{cid}`) — {src_count} sources")
+            lines.append(f"• **{name}** (`{cid}`) — {len(get_sources(cid))} sources")
         await _safe_reply(event, "\n".join(lines))
     except Exception as e:
         await _safe_reply(event, f"❌ error: `{e}`")
@@ -478,7 +489,7 @@ async def cmd_q_cache(event):
     try:
         cache = DB.get("qa_cache", {})
         top = sorted(cache.items(), key=lambda kv: kv[1].get("hits", 0), reverse=True)[:10]
-        lines = [f"💾 **QA Cache: {len(cache)} entries**\n"]
+        lines = [f"💾 **Cache: {len(cache)} entries**\n"]
         for q, v in top:
             lines.append(f"• ({v.get('hits', 0)}×) \"{q[:40]}\" → \"{v.get('answer', '')[:30]}\"")
         await _safe_reply(event, "\n".join(lines))
@@ -501,9 +512,69 @@ async def cmd_q_clear(event):
         await _safe_reply(event, f"❌ error: `{e}`")
 
 
+@CipherElite.on(events.NewMessage(pattern=r'\.q\s+learn\s+"([^"]+)"\s+"([^"]+)"$'))
+@rishabh()
+async def cmd_q_learn(event):
+    if not await _is_owner(event):
+        return
+    try:
+        q = event.pattern_match.group(1).strip()
+        a = event.pattern_match.group(2).strip()
+        try: await event.delete()
+        except: pass
+        cache_store(q, a)
+        await _safe_reply(event, f"✅ Pre-cached: Q=\"{q[:50]}\" A=\"{a}\"")
+    except Exception as e:
+        await _safe_reply(event, f"❌ error: `{e}`")
+
+
 # ═══════════════════════════════════════════════════════════════
-#  SOURCES COMMANDS (.kq)
+#  .kq COMMANDS
 # ═══════════════════════════════════════════════════════════════
+
+@CipherElite.on(events.NewMessage(pattern=r"\.kq\s+setgroq\s+(\S+)$"))
+@rishabh()
+async def cmd_kq_setgroq(event):
+    if not await _is_owner(event):
+        return
+    try:
+        global GROQ_API_KEY
+        key = event.pattern_match.group(1).strip()
+        if not key.startswith("gsk_"):
+            return await _safe_reply(event, "❌ Groq key should start with `gsk_`")
+        if len(key) < 40:
+            return await _safe_reply(event, f"❌ Key too short ({len(key)} chars)")
+        try: await event.delete()
+        except: pass
+        GROQ_CONFIG_FILE.write_text(
+            json.dumps({"key": key, "saved_at": wat_now().strftime("%Y-%m-%d %H:%M:%S")}, indent=2),
+            encoding="utf-8"
+        )
+        GROQ_API_KEY = key
+        await _safe_reply(event, f"✅ Groq key saved ({len(key)} chars)")
+    except Exception as e:
+        await _safe_reply(event, f"❌ error: `{e}`")
+
+
+@CipherElite.on(events.NewMessage(pattern=r"\.kq\s+groqtest$"))
+@rishabh()
+async def cmd_kq_groqtest(event):
+    if not await _is_owner(event):
+        return
+    try:
+        if not GROQ_API_KEY:
+            return await _safe_reply(event, "❌ No Groq key set. Run `.kq setgroq <key>`.")
+        await _safe_reply(event, "⏳ Testing Groq...")
+        t0 = time.time()
+        ans = await _groq_answer("What is 2+2?", event.chat_id)
+        elapsed = int((time.time() - t0) * 1000)
+        if ans:
+            await _safe_reply(event, f"✅ Groq OK — {elapsed}ms\nAnswer: \"{ans}\"")
+        else:
+            await _safe_reply(event, f"❌ Groq failed ({elapsed}ms). Check console.")
+    except Exception as e:
+        await _safe_reply(event, f"❌ error: `{e}`")
+
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kq\s+add\s+(web|note)\s+(.+)$"))
 async def cmd_kq_add(event):
@@ -519,10 +590,10 @@ async def cmd_kq_add(event):
         name = getattr(chat, "title", "Unknown")
 
         if not add_source(cid, stype, value):
-            await CipherElite.send_message(AI_LOG_CHAT_ID, f"ℹ️ Source already exists in **{name}**")
+            await CipherElite.send_message(AI_LOG_CHAT_ID, f"ℹ️ Source already exists")
             return
 
-        msg = f"✅ **{stype}** source added to **{name}**"
+        msg = f"✅ **{stype}** added to **{name}**"
         if stype == "web":
             txt = await fetch_website(value)
             if txt:
@@ -535,7 +606,7 @@ async def cmd_kq_add(event):
                 set_sources(cid, sources)
                 msg += f"\n📄 Fetched {len(txt)} chars"
             else:
-                msg += "\n⚠️ Fetch failed — will retry on `.kq fetch`"
+                msg += "\n⚠️ Fetch failed — try `.kq fetch`"
         elif stype == "note":
             sources = get_sources(cid)
             for s in sources:
@@ -562,10 +633,9 @@ async def cmd_kq_list(event):
             return await _safe_reply(event, "📭 No sources for this group.")
         lines = [f"📚 **Sources** ({len(sources)})\n"]
         for i, s in enumerate(sources):
-            text_len = len(s.get("text", ""))
             lines.append(
                 f"`{i}` **{s['type']}**: {s.get('value', '')[:60]}\n"
-                f"   └ {text_len} chars cached"
+                f"   └ {len(s.get('text', ''))} chars"
             )
         await _safe_reply(event, "\n".join(lines))
     except Exception as e:
@@ -579,8 +649,7 @@ async def cmd_kq_remove(event):
         return
     try:
         idx = int(event.pattern_match.group(1))
-        cid = event.chat_id
-        if remove_source(cid, idx):
+        if remove_source(event.chat_id, idx):
             await _safe_reply(event, f"🗑️ Removed source `{idx}`")
         else:
             await _safe_reply(event, f"❌ Invalid index `{idx}`")
@@ -594,9 +663,8 @@ async def cmd_kq_clear(event):
     if not await _is_owner(event):
         return
     try:
-        cid = event.chat_id
-        clear_sources(cid)
-        await _safe_reply(event, "🔄 Sources cleared for this group.")
+        clear_sources(event.chat_id)
+        await _safe_reply(event, "🔄 Sources cleared.")
     except Exception as e:
         await _safe_reply(event, f"❌ error: `{e}`")
 
@@ -607,9 +675,8 @@ async def cmd_kq_fetch(event):
     if not await _is_owner(event):
         return
     try:
-        cid = event.chat_id
-        await _safe_reply(event, "⏳ Fetching web sources...")
-        n = await refresh_all_sources(cid)
+        await _safe_reply(event, "⏳ Fetching...")
+        n = await refresh_all_sources(event.chat_id)
         await _safe_reply(event, f"✅ Refreshed {n} web source(s)")
     except Exception as e:
         await _safe_reply(event, f"❌ error: `{e}`")
@@ -621,43 +688,90 @@ async def cmd_kq_show(event):
     if not await _is_owner(event):
         return
     try:
-        cid = event.chat_id
-        block = build_knowledge_block(cid)
+        block = build_knowledge_block(event.chat_id)
         if not block:
-            return await _safe_reply(event, "📭 No knowledge block yet.")
-        await _safe_reply(event, f"📚 **Knowledge preview** ({len(block)} chars)\n\n{block[:1500]}")
+            return await _safe_reply(event, "📭 No knowledge yet.")
+        await _safe_reply(event, f"📚 **Knowledge** ({len(block)} chars)\n\n{block[:1500]}")
     except Exception as e:
         await _safe_reply(event, f"❌ error: `{e}`")
 
-# ═══ END OF CHUNK 1 ═══
+# ═══ END OF CHUNK 2 ═══
 # ═══════════════════════════════════════════════════════════════
-#  FAST GEMINI — cached client, tiny prompt
+#  GROQ — ULTRA FAST
 # ═══════════════════════════════════════════════════════════════
 
-_quiz_client = None
+async def _groq_answer(question, cid):
+    if not GROQ_API_KEY:
+        return None
 
-def _get_quiz_client():
-    global _quiz_client
-    if _quiz_client is None:
+    knowledge = build_knowledge_block(cid)
+    knowledge_section = f"Known facts:\n{knowledge[:1500]}\n" if knowledge else ""
+
+    prompt = f"""{knowledge_section}Answer this quiz question in 1-3 words, lowercase, no punctuation, no emoji, no explanation:
+{question[:250]}
+Answer:"""
+
+    try:
+        payload = {
+            "model": GROQ_MODEL,
+            "messages": [
+                {"role": "system", "content": "You answer quiz questions with 1-3 word answers only. No explanation."},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": 15,
+        }
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json",
+        }
+        timeout = aiohttp.ClientTimeout(total=5)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(GROQ_URL, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    dbg(f"groq HTTP {resp.status}: {body[:200]}")
+                    return None
+                data = await resp.json()
+        text = data.get("choices", [{}])[0].get("message", {}).get("content", "").strip()
+        text = text.replace("\n", " ").replace("*", "").replace("_", "").strip('"').strip("'")
+        text = re.sub(r'^(answer|ans|reply|the answer is)[:\s]*', '', text, flags=re.IGNORECASE)
+        text = text.strip(".,!?;:")
+        if len(text) < 1 or len(text) > 60:
+            return None
+        dbg(f"groq answer: '{text}'")
+        return text
+    except Exception as e:
+        print(f"[quizhot] groq error: {e}")
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════
+#  GEMINI — FALLBACK
+# ═══════════════════════════════════════════════════════════════
+
+_gemini_client = None
+
+
+def _get_gemini_client():
+    global _gemini_client
+    if _gemini_client is None:
         api_key = ai_config.get_api_key()
         if not api_key:
             return None
-        _quiz_client = genai.Client(api_key=api_key)
-    return _quiz_client
+        _gemini_client = genai.Client(api_key=api_key)
+    return _gemini_client
 
 
-async def _fast_quiz_answer(question, cid):
-    """Cache-first, then Gemini with knowledge block."""
+async def _gemini_answer(question, cid):
     if not ai_config.is_enabled():
         return None
-    client = _get_quiz_client()
+    client = _get_gemini_client()
     if client is None:
         return None
 
     knowledge = build_knowledge_block(cid)
-    knowledge_section = ""
-    if knowledge:
-        knowledge_section = f"\nKnown facts about this project:\n{knowledge}\n"
+    knowledge_section = f"\nKnown facts:\n{knowledge[:2000]}\n" if knowledge else ""
 
     prompt = f"""{knowledge_section}Answer this quiz question in 1-3 words, lowercase, no punctuation, no emoji, no explanation:
 {question[:250]}
@@ -680,14 +794,25 @@ Answer:"""
         text = text.strip(".,!?;:")
         if len(text) < 1 or len(text) > 60:
             return None
+        dbg(f"gemini answer: '{text}'")
         return text
     except Exception as e:
         print(f"[quizhot] gemini error: {e}")
         return None
 
 
+async def _get_answer(question, cid):
+    """Groq first, then Gemini fallback."""
+    if GROQ_API_KEY:
+        ans = await _groq_answer(question, cid)
+        if ans:
+            return ans
+        dbg("groq failed, falling back to gemini")
+    return await _gemini_answer(question, cid)
+
+
 # ═══════════════════════════════════════════════════════════════
-#  MAIN WATCHER — cache → Gemini → reply
+#  MAIN WATCHER
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage)
@@ -724,7 +849,7 @@ async def quiz_watcher(event):
 
         lower = text.lower()
 
-        # ── LEARNING: admin says "correct" replying to answer
+        # ── LEARNING: admin says "correct"
         if event.is_reply:
             try:
                 replied = await event.get_reply_message()
@@ -742,7 +867,6 @@ async def quiz_watcher(event):
                     correct = replied.raw_text.strip()[:100]
                     state["correct_options"].append(correct)
                     state["correct_options"] = state["correct_options"][-30:]
-
                     last_q = state.get("last_question_text")
                     if last_q:
                         cache_store(last_q, correct)
@@ -792,7 +916,7 @@ async def quiz_watcher(event):
                     dbg(f"click error: {e}")
                 return
 
-        # ── TEXT QUIZ — strict question check
+        # ── TEXT QUIZ
         if not is_question(text):
             return
 
@@ -802,37 +926,38 @@ async def quiz_watcher(event):
         state["last_answer_ts"] = wat_now().timestamp()
         LEARN[chat_id] = state
 
-        # ── 1) cache lookup
+        # cache first
         cached = cache_lookup(text)
         if cached:
-            dbg(f"FAST from cache: '{cached}'")
+            dbg(f"FAST cache: '{cached}'")
             try:
                 await event.reply(cached)
                 dbg(f"REPLIED (cache): '{cached}'")
             except Exception as e:
-                print(f"[quizhot] send error (cache): {e}")
+                print(f"[quizhot] send err: {e}")
             return
 
-        # ── 2) Gemini fallback
-        answer = await _fast_quiz_answer(text, chat_id)
+        # Groq → Gemini
+        t0 = time.time()
+        answer = await _get_answer(text, chat_id)
+        elapsed = int((time.time() - t0) * 1000)
         if not answer:
-            dbg("no answer generated")
+            dbg(f"no answer ({elapsed}ms)")
             return
 
         try:
             await event.reply(answer)
-            dbg(f"REPLIED (gemini): '{answer}'")
+            dbg(f"REPLIED ({elapsed}ms): '{answer}'")
         except Exception as e:
-            print(f"[quizhot] send error: {e}")
+            print(f"[quizhot] send err: {e}")
             return
 
-        # learn from our own answer for future rounds
         cache_store(text, answer)
 
         try:
             await CipherElite.send_message(
                 AI_LOG_CHAT_ID,
-                f"🎯 **QUIZ ANSWERED**\n📍 `{chat_id}`\n❓ \"{text[:150]}\"\n🤖 \"{answer}\"\n🕐 {wat_now().strftime('%I:%M:%S %p')} WAT"
+                f"🎯 **QUIZ ANSWERED** ({elapsed}ms)\n📍 `{chat_id}`\n❓ \"{text[:150]}\"\n🤖 \"{answer}\"\n🕐 {wat_now().strftime('%I:%M:%S %p')} WAT"
             )
         except Exception:
             pass
@@ -842,7 +967,7 @@ async def quiz_watcher(event):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  BOOTSTRAP — start auto-refresh loop
+#  BOOTSTRAP
 # ═══════════════════════════════════════════════════════════════
 
 async def _plugin_bootstrap():
@@ -850,6 +975,10 @@ async def _plugin_bootstrap():
         await asyncio.sleep(10)
         asyncio.create_task(auto_refresh_loop())
         dbg("bootstrap: auto-refresh started")
+        if GROQ_API_KEY:
+            dbg(f"bootstrap: groq key loaded ({len(GROQ_API_KEY)} chars)")
+        else:
+            dbg("bootstrap: NO groq key — use .kq setgroq <key>")
     except Exception as e:
         print(f"[quizhot] bootstrap error: {e}")
 
@@ -861,15 +990,16 @@ except Exception as e:
 
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║  === END OF QUIZHOT v3.5 — MAD SPEED + SOURCES ===           ║
+# ║  === END OF QUIZHOT v4.0 — GROQ EDITION ===                  ║
 # ║                                                              ║
-# ║  Features:                                                   ║
-# ║  • Cache-first (10ms on repeat questions)                    ║
-# ║  • Strict question filter (ends with ? or starts Q-word)     ║
-# ║  • Per-group knowledge sources (web + notes)                 ║
-# ║  • Auto-refresh web sources every 6h                         ║
+# ║  • Groq primary (300-500ms)                                  ║
+# ║  • Gemini fallback (1-2s)                                    ║
+# ║  • Cache hits (150ms)                                        ║
+# ║  • Per-group sources (web + notes)                           ║
+# ║  • Strict question filter                                    ║
+# ║  • No typing/online sim                                      ║
+# ║  • Auto-refresh sources every 6h                             ║
 # ║  • Learns from admin "correct" replies                       ║
-# ║  • Beast mode — no typing, no online ping, no delay          ║
-# ║  • Button quiz support                                       ║
-# ║  • Learns from own answers (feeds cache)                     ║
 # ╚══════════════════════════════════════════════════════════════╝
+
+                                  
