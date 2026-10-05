@@ -988,6 +988,26 @@ try:
 except Exception as e:
     print(f"[quizhot] bootstrap init error: {e}")
 
+@CipherElite.on(events.NewMessage(pattern=r"\.kq\s+models$"))
+@rishabh()
+async def cmd_kq_models(event):
+    if not await _is_owner(event):
+        return
+    try:
+        if not GROQ_API_KEY:
+            return await _safe_reply(event, "❌ No Groq key")
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "https://api.groq.com/openai/v1/models",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"}
+            ) as resp:
+                if resp.status != 200:
+                    return await _safe_reply(event, f"❌ HTTP {resp.status}")
+                data = await resp.json()
+        ids = [m["id"] for m in data.get("data", [])]
+        await _safe_reply(event, f"**Available models ({len(ids)}):**\n\n" + "\n".join(f"`{i}`" for i in ids))
+    except Exception as e:
+        await _safe_reply(event, f"❌ error: `{e}`")
 
 # ╔══════════════════════════════════════════════════════════════╗
 # ║  === END OF QUIZHOT v4.0 — GROQ EDITION ===                  ║
