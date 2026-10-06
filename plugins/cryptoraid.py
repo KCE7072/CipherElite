@@ -1182,10 +1182,15 @@ async def raid_detector(event):
             return
 
         chat = await event.get_chat()
-        chat_name = getattr(chat, "title", "Unknown")
-        chat_id = event.chat_id
-        stamp = raid_now_dict()
+chat_name = getattr(chat, "title", "Unknown")
+chat_id = event.chat_id
+stamp = raid_now_dict()
 
+# skip raids we can't identify (Unknown group / no title)
+if chat_name == "Unknown" or not chat_id:
+    rdbg(f"skipping raid from Unknown chat (chat_id={chat_id})")
+    return
+    
         for url in new_urls:
             smashed[url] = {
                 "date": stamp["date"], "time": stamp["time"],
@@ -1301,6 +1306,9 @@ print("[cryptoraid] MODULE LOADED — chunk 5A")
 # ═══════════════════════════════════════════════════════════════
 #  RAIDAR DM WATCHER
 # ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+#  RAIDAR DM WATCHER
+# ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage(from_users=RAIDAR_USER_ID))
 async def raidar_watcher(event):
@@ -1319,20 +1327,20 @@ async def raidar_watcher(event):
             or "Raid Ended" in text
             or "Targets Reached" in text):
 
+            # skip if this tweet already processed
             processed = RAID_DB.get("processed_tweet_ids", [])
             if dm_tweet_id and dm_tweet_id in processed:
                 rdbg(f"DM#1 for already-processed tid={dm_tweet_id} — skipping")
                 return
 
+            # check current_raid — only skip if SAME tweet_id active
             cur = RAID_DB.get("current_raid")
             if cur and cur.get("status") == "active":
                 cur_tid = cur.get("tweet_id")
                 if dm_tweet_id and cur_tid and dm_tweet_id == cur_tid:
-                    rdbg(f"DM#1 dup for active raid {cur['raid_id']} — skipping")
+                    rdbg(f"DM#1 dup for same active raid {cur['raid_id']} — skipping")
                     return
-                if event.message.id == cur.get("raidar_dm_msg_id"):
-                    rdbg(f"DM#1 dup msg_id for raid {cur['raid_id']} — skipping")
-                    return
+                # different raid — will queue normally below
 
             awaiting = RAID_DB.get("awaiting_dm", [])
             match_idx = None
@@ -1362,6 +1370,15 @@ async def raidar_watcher(event):
             raid = awaiting.pop(match_idx)
             RAID_DB["awaiting_dm"] = awaiting
             rdbg(f"DM#1 matched raid {raid['raid_id']} by {match_reason}")
+
+            # if another raid is currently processing, put this back in awaiting
+            cur = RAID_DB.get("current_raid")
+            if cur and cur.get("status") == "active" and cur.get("raid_id") != raid["raid_id"]:
+                rdbg(f"raid {cur['raid_id']} still active — requeueing {raid['raid_id']}")
+                awaiting.append(raid)
+                RAID_DB["awaiting_dm"] = awaiting
+                raid_save_db(RAID_DB)
+                return
 
             raid["dm1_received"] = True
             raid["dm1_time"] = stamp["time12"]
@@ -1451,6 +1468,8 @@ async def raidar_watcher(event):
         print(f"[cryptoraid] raidar watcher err: {e}")
 
 print("[cryptoraid] MODULE LOADED — chunk 5B")
+
+# ═══ END OF CHUNK 5B ═══
 
 # ═══ END OF CHUNK 5B ═══
 # ═══════════════════════════════════════════════════════════════
