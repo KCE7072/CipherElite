@@ -1479,6 +1479,9 @@ print("[cryptoraid] MODULE LOADED — chunk 6B")
 # ═══════════════════════════════════════════════════════════════
 #  PROCESS QUEUE
 # ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+#  PROCESS QUEUE
+# ═══════════════════════════════════════════════════════════════
 
 async def raid_process_queue():
     if PROCESSING["active"]:
@@ -1654,12 +1657,8 @@ async def raid_process_queue():
                         break
 
                 if not dm2_seen:
-                    rdbg("xp-catcher: polling Raidar DMs...")
-                    dm2_seen = await raid_poll_dm2(
-                        tweet_id,
-                        DM2_WAIT_SECONDS,
-                        target_msg_id=raid.get("raidar_dm_msg_id")
-                    )
+                    rdbg("polling Raidar DMs for DM#2...")
+                    dm2_seen = await raid_poll_dm2(tweet_id, DM2_WAIT_SECONDS)
 
                 if not dm2_seen:
                     reason_lines = []
@@ -1791,5 +1790,7 @@ except Exception as e:
 print("[cryptoraid] MODULE LOADED SUCCESSFULLY — v7.6 ready")
 
 # ═══ END OF CHUNK 6C ═══
+
+                                        
 
                 
