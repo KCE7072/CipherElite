@@ -1,6 +1,6 @@
 # =============================================================================
-#  CipherElite Plugin - cryptoraid v7.0
-#  One DM per raid, edited at each step. Verify from Raidar DM. Tone-matched.
+#  CipherElite Plugin - cryptoraid v7.1
+#  Multi-source link extraction + recency fallback + one-DM edited flow
 # =============================================================================
 
 from telethon import events, Button, TelegramClient
@@ -19,9 +19,9 @@ import aiohttp
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-print("[cryptoraid] IMPORTING v7.0")
+print("[cryptoraid] IMPORTING v7.1")
 
-VERSION = "7.0.0"
+VERSION = "7.1.0"
 CATEGORY = "utilities"
 
 RAID_WAT = timezone(timedelta(hours=1))
@@ -41,10 +41,10 @@ RAID_KEYWORDS = ['raid', 'smash', 'retweet', 'raid tweet', 'reply on x', 'lfg ra
 SMASH_BUTTON = '👊'
 OTHER_TARGETS = ['🤛', '✊', '🤜', 'Verify', 'Verified', '✅', 'Confirmed']
 
-VERIFY_WAIT_AFTER_DONE = 10   # 10s after Done before clicking Verify
-DM2_WAIT_SECONDS = 60         # wait for XP confirmation
-DM1_WAIT_SECONDS = 10         # short wait for Raidar DM #1
-MANUAL_DONE_TIMEOUT = 900     # 15 min max for user to tap Done
+VERIFY_WAIT_AFTER_DONE = 10
+DM2_WAIT_SECONDS = 60
+MANUAL_DONE_TIMEOUT = 900
+RECENCY_MATCH_WINDOW = 60
 DEBUG = True
 RAID_DM_KEEP = 30
 
@@ -74,10 +74,10 @@ def raid_load_db():
         print(f"[cryptoraid] load err: {e}")
     return {
         "smashed": {}, "count": 0, "whitelist": [],
-        "awaiting_dm": [],       # raids waiting for Raidar DM match
-        "current_raid": None,    # the active one (dm matched)
+        "awaiting_dm": [],
+        "current_raid": None,
         "completed": [], "failed": [],
-        "raidar_dms_wl": [], "paused": False,
+        "paused": False,
         "started": raid_now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -138,6 +138,57 @@ def raid_extract_x_urls(text):
 def raid_tweet_id(url):
     m = re.search(r'/status/(\d+)', url or "")
     return m.group(1) if m else None
+
+
+def raid_extract_link_from_msg(msg):
+    """Try MULTIPLE sources for x/twitter link from a message object."""
+    if not msg:
+        return None
+
+    # 1) text body
+    try:
+        text = getattr(msg, "raw_text", None) or getattr(msg, "message", None) or ""
+        urls = raid_extract_x_urls(text)
+        if urls:
+            return urls[0]
+    except Exception:
+        pass
+
+    # 2) web preview
+    try:
+        wp = getattr(msg, "web_preview", None)
+        if wp:
+            for attr in ("url", "display_url"):
+                val = getattr(wp, attr, None)
+                if val and ("x.com" in val or "twitter.com" in val):
+                    return raid_norm_url(val)
+    except Exception:
+        pass
+
+    # 3) entities (URL entities)
+    try:
+        entities = getattr(msg, "entities", None) or []
+        for ent in entities:
+            ent_url = getattr(ent, "url", None)
+            if ent_url and ("x.com" in ent_url or "twitter.com" in ent_url):
+                return raid_norm_url(ent_url)
+    except Exception:
+        pass
+
+    # 4) button URLs
+    try:
+        buttons = getattr(msg, "buttons", None)
+        if buttons:
+            for row in buttons:
+                for btn in row:
+                    burl = getattr(btn, "url", None)
+                    if burl and ("x.com" in burl or "twitter.com" in burl):
+                        return raid_norm_url(burl)
+    except Exception:
+        pass
+
+    # 5) reply_to_msg_id chain — check if the message replies to one with a link
+    return None
 
 
 def raid_has_intent(text):
@@ -213,7 +264,7 @@ async def raid_edit_log(msg_id, text):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  LOG CARD — compact
+#  LOG CARD
 # ═══════════════════════════════════════════════════════════════
 
 def raid_build_card(raid_id, chat_name, link, steps, status="processing"):
@@ -229,7 +280,7 @@ def raid_build_card(raid_id, chat_name, link, steps, status="processing"):
 
     next_step = {
         "skip": "⏭️ Not whitelisted — smash logged only.",
-        "queued": "📩 Waiting for Raidar DM #1...",
+        "queued": "📩 Waiting for Raidar DM...",
         "waiting": "👤 Check your DM — pick → paste → tap Done.",
         "processing": "⚙️ Verifying... sit tight.",
         "done": "🎉 XP confirmed. All done.",
@@ -277,7 +328,6 @@ def raid_build_card(raid_id, chat_name, link, steps, status="processing"):
 # ═══════════════════════════════════════════════════════════════
 
 def dm_step_header(raid_id, chat_name, step_num, total_steps=5):
-    """Progress bar: ●●○○○"""
     filled = "●" * step_num
     empty = "○" * (total_steps - step_num)
     return (
@@ -302,7 +352,6 @@ def dm_tweet_block(tweet_data, tweet_text, tweet_author, max_len=400):
 
 
 def dm_build_step1(raid_id, chat_name, tweet_data, tweet_text, tweet_author, replies):
-    """Pick a reply"""
     header = dm_step_header(raid_id, chat_name, 1)
     tweet = dm_tweet_block(tweet_data, tweet_text, tweet_author)
     reply_list = "\n".join([f"**{i+1}.** {r}" for i, r in enumerate(replies)])
@@ -317,7 +366,6 @@ def dm_build_step1(raid_id, chat_name, tweet_data, tweet_text, tweet_author, rep
 
 
 def dm_build_step2(raid_id, chat_name, tweet_data, tweet_text, tweet_author, idx, chosen):
-    """Reply selected — copy ready"""
     header = dm_step_header(raid_id, chat_name, 2)
     tweet = dm_tweet_block(tweet_data, tweet_text, tweet_author, max_len=250)
     return (
@@ -334,7 +382,6 @@ def dm_build_step2(raid_id, chat_name, tweet_data, tweet_text, tweet_author, idx
 
 
 def dm_build_step3(raid_id, chat_name, chosen):
-    """Waiting to verify"""
     header = dm_step_header(raid_id, chat_name, 3)
     return (
         f"{header}\n"
@@ -349,11 +396,10 @@ def dm_build_step3(raid_id, chat_name, chosen):
 
 
 def dm_build_step4(raid_id, chat_name, verify_ok):
-    """Verify clicked, waiting for XP"""
     header = dm_step_header(raid_id, chat_name, 4)
     status_line = (
         "✅ **VERIFY CLICKED**\n"
-        "▸ Now waiting for Raidar DM #2..."
+        "▸ Waiting for Raidar DM #2..."
         if verify_ok else
         "⚠️ **VERIFY BUTTON NOT FOUND**\n"
         "▸ Waiting for Raidar DM #2 anyway..."
@@ -370,7 +416,6 @@ def dm_build_step4(raid_id, chat_name, verify_ok):
 
 
 def dm_build_step5_success(raid_id, chat_name, chosen, tweet_data, tweet_text, tweet_author):
-    """XP confirmed"""
     header = dm_step_header(raid_id, chat_name, 5)
     tweet = dm_tweet_block(tweet_data, tweet_text, tweet_author, max_len=200)
     return (
@@ -389,7 +434,6 @@ def dm_build_step5_success(raid_id, chat_name, chosen, tweet_data, tweet_text, t
 
 
 def dm_build_step5_fail(raid_id, chat_name, chosen, fail_reasons):
-    """Failed"""
     header = dm_step_header(raid_id, chat_name, 5)
     return (
         f"{header}\n"
@@ -451,7 +495,6 @@ async def raid_start_bot():
 
 
 async def raid_dm_owner(text, buttons=None):
-    """Send a new DM to owner."""
     if not QUEUE_BOT or not QUEUE_BOT.is_connected():
         rdbg("dm: bot not connected")
         return None
@@ -463,7 +506,6 @@ async def raid_dm_owner(text, buttons=None):
 
 
 async def raid_edit_dm(msg_id, text, buttons=None):
-    """Edit an existing DM."""
     if not QUEUE_BOT or not QUEUE_BOT.is_connected():
         return None
     try:
@@ -491,7 +533,7 @@ def init(client_instance):
         "..wl off - remove whitelist",
         "..wl list - list whitelisted",
     ]
-    add_handler("cryptoraid", commands, "🎯 Raid v7.0 — one DM, edited steps")
+    add_handler("cryptoraid", commands, "🎯 Raid v7.1 — multi-source match")
     print("[cryptoraid] commands registered")
 
 print("[cryptoraid] MODULE LOADED — chunk 1")
@@ -580,7 +622,7 @@ async def cmd_status(event):
         paused = RAID_DB.get("paused", False)
         bot_st = "✅ online" if (QUEUE_BOT and QUEUE_BOT.is_connected()) else "❌ offline"
         msg = (
-            f"🎯 **Crypto Raid v7.0**\n"
+            f"🎯 **Crypto Raid v7.1**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"{'⏸️ PAUSED' if paused else '✅ Active'}\n"
             f"👊 Smashes: `{RAID_DB.get('count', 0)}`\n"
@@ -757,7 +799,6 @@ async def raid_handle_cb(event, data):
     parts = data.split(":")
     action = parts[0]
 
-    # ── PICK REPLY
     if action == "copy":
         try:
             idx = int(parts[1])
@@ -775,7 +816,6 @@ async def raid_handle_cb(event, data):
 
             await event.answer(f"✅ Reply #{idx+1} selected")
 
-            # ─── EDIT the same DM to step 2
             td = cur.get("tweet_data") or {}
             step2_text = dm_build_step2(
                 cur["raid_id"], cur["chat_name"],
@@ -787,17 +827,19 @@ async def raid_handle_cb(event, data):
                 [Button.url("🔗 Open X post", deeplink)],
                 [Button.inline("✅ Done — I posted it", f"done:{cur['raid_id']}".encode())],
             ]
-            await event.edit(step2_text, buttons=step2_buttons)
-            rdbg(f"edit DM → step 2 (picked #{idx+1})")
+            try:
+                await event.edit(step2_text, buttons=step2_buttons)
+                rdbg(f"edit DM → step 2")
+            except Exception as e:
+                rdbg(f"edit err: {e}, fallback new msg")
+                try:
+                    await QUEUE_BOT.send_message(event.sender_id, step2_text, buttons=step2_buttons)
+                except Exception:
+                    pass
         except Exception as e:
             print(f"[cryptoraid] copy cb err: {e}")
-            try:
-                await event.answer(f"err: {e}", alert=True)
-            except Exception:
-                pass
         return
 
-    # ── DONE — user posted
     if action == "done":
         try:
             rid = parts[1]
@@ -809,25 +851,22 @@ async def raid_handle_cb(event, data):
 
             cur["manual_done"] = True
             cur["manual_done_ts"] = raid_now().timestamp()
-            cur["dm_step"] = 3
             RAID_DB["current_raid"] = cur
             raid_save_db(RAID_DB)
 
-            await event.answer("✅ Confirmed — verifying soon", alert=False)
+            await event.answer("✅ Confirmed — verifying soon")
 
-            # ─── EDIT DM to step 3
             step3_text = dm_build_step3(
                 cur["raid_id"], cur["chat_name"],
                 cur.get("chosen_reply", "")
             )
-            await event.edit(step3_text, buttons=None)
-            rdbg(f"edit DM → step 3 (waiting to verify)")
+            try:
+                await event.edit(step3_text, buttons=None)
+                rdbg(f"edit DM → step 3")
+            except Exception as e:
+                rdbg(f"edit err step3: {e}")
         except Exception as e:
             print(f"[cryptoraid] done cb err: {e}")
-            try:
-                await event.answer(f"err: {e}", alert=True)
-            except Exception:
-                pass
         return
 
     await event.answer("unknown")
@@ -916,8 +955,7 @@ print("[cryptoraid] MODULE LOADED — chunk 2")
 # ═══ END OF CHUNK 2 ═══
 # ═══════════════════════════════════════════════════════════════
 #  SMASH DETECTOR — ALL groups
-#  On smash → store as awaiting_dm (no reply flow yet)
-#  Reply flow starts when Raidar DM matches by tweet ID
+#  Multi-source link extraction (text + web_preview + entities + buttons)
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage)
@@ -930,9 +968,55 @@ async def raid_detector(event):
             return
         if not raid_has_intent(text):
             return
+
+        # ─── multi-source link extraction
         urls = raid_extract_x_urls(text)
+
+        # fallback: web preview
         if not urls:
+            try:
+                wp = getattr(event.message, "web_preview", None)
+                if wp:
+                    for attr in ("url", "display_url"):
+                        val = getattr(wp, attr, None)
+                        if val and ("x.com" in val or "twitter.com" in val):
+                            urls = [raid_norm_url(val)]
+                            rdbg(f"link from web_preview: {val}")
+                            break
+            except Exception:
+                pass
+
+        # fallback: entities
+        if not urls:
+            try:
+                for ent in (event.message.entities or []):
+                    ent_url = getattr(ent, "url", None)
+                    if ent_url and ("x.com" in ent_url or "twitter.com" in ent_url):
+                        urls = [raid_norm_url(ent_url)]
+                        rdbg(f"link from entity: {ent_url}")
+                        break
+            except Exception:
+                pass
+
+        # fallback: button URLs
+        if not urls and event.buttons:
+            try:
+                for row in event.buttons:
+                    for btn in row:
+                        burl = getattr(btn, "url", None)
+                        if burl and ("x.com" in burl or "twitter.com" in burl):
+                            urls = [raid_norm_url(burl)]
+                            rdbg(f"link from button: {burl}")
+                            break
+                    if urls:
+                        break
+            except Exception:
+                pass
+
+        if not urls:
+            rdbg("no x link found in message")
             return
+
         smashed = RAID_DB.get("smashed", {})
         new_urls = [u for u in urls if u not in smashed]
         if not new_urls:
@@ -993,9 +1077,8 @@ async def raid_detector(event):
         is_wl = raid_is_wl(chat_id)
         tweet_id = raid_tweet_id(new_urls[0])
 
-        # ─── NOT whitelisted → smash only, log to SMASH LOG
+        # ─── NOT whitelisted
         if not is_wl:
-            # fetch quick tweet preview
             tweet_data = await raid_fetch_tweet(new_urls[0])
             tweet_text = (tweet_data or {}).get("text", "")
             tweet_author = (tweet_data or {}).get("author", "")
@@ -1019,9 +1102,7 @@ async def raid_detector(event):
             await raid_send_log(card)
             return
 
-        # ─── WHITELISTED → store as awaiting_dm
-        # We do NOT send any DM yet. We wait for Raidar DM #1 to match.
-        # Fetch tweet info now so it's ready.
+        # ─── Whitelisted
         tweet_data = await raid_fetch_tweet(new_urls[0])
         tweet_text = (tweet_data or {}).get("text", "")
         tweet_author = (tweet_data or {}).get("author", "")
@@ -1040,7 +1121,7 @@ async def raid_detector(event):
             steps.append(f"📝 @{tweet_author}\n   ▸ \"{short}\"")
         else:
             steps.append(f"📝 ORIGINAL POST\n   ▸ (content unavailable)")
-        steps.append(f"3️⃣ 📡 WAITING FOR RAIDAR DM #1...")
+        steps.append(f"3️⃣ 📡 WAITING FOR RAIDAR DM...")
 
         raid_obj = {
             "raid_id": raid_id,
@@ -1057,8 +1138,8 @@ async def raid_detector(event):
             "status": "awaiting_dm",
             "steps": steps,
             "log_msg_id": None,
-            "dm_msg_id": None,          # the single evolving DM
-            "raidar_dm_msg_id": None,   # the Raidar DM we'll click Verify on
+            "dm_msg_id": None,
+            "raidar_dm_msg_id": None,
             "reply_options": [],
             "chosen_reply": None,
             "manual_done": False,
@@ -1074,10 +1155,9 @@ async def raid_detector(event):
         }
         awaiting = RAID_DB.get("awaiting_dm", [])
         awaiting.append(raid_obj)
-        RAID_DB["awaiting_dm"] = awaiting[-50:]  # cap
+        RAID_DB["awaiting_dm"] = awaiting[-50:]
         raid_save_db(RAID_DB)
 
-        # SMASH LOG card (queued state)
         card = raid_build_card(raid_id, chat_name, f"https://{new_urls[0]}", steps, "queued")
         log_msg = await raid_send_log(card)
         if log_msg:
@@ -1093,11 +1173,13 @@ async def raid_detector(event):
     except Exception as e:
         print(f"[cryptoraid] detector err: {e}")
 
+print("[cryptoraid] MODULE LOADED — chunk 3A")
 
+# ═══ END OF CHUNK 3A ═══
 # ═══════════════════════════════════════════════════════════════
-#  RAIDAR DM WATCHER — matches by tweet ID
-#  On DM #1 match → activate raid, start reply flow
-#  On DM #2 → XP confirmation
+#  RAIDAR DM WATCHER
+#  DM #1 → activate raid (match by tweet_id OR recency)
+#  DM #2 → XP confirmation
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage(from_users=RAIDAR_USER_ID))
@@ -1105,44 +1187,58 @@ async def raidar_watcher(event):
     try:
         text = event.raw_text or ""
         stamp = raid_now_dict()
-        urls = raid_extract_x_urls(text)
-        dm_link = urls[0] if urls else None
+
+        # ─── multi-source link extraction from the DM
+        dm_link = raid_extract_link_from_msg(event.message)
         dm_tweet_id = raid_tweet_id(dm_link) if dm_link else None
+        rdbg(f"raidar DM: link={dm_link} tid={dm_tweet_id}")
 
         # ── DM #1 (smash confirmed)
         if "How to earn reply XP" in text or "Raid Tweet" in text:
-            # look in awaiting_dm
             awaiting = RAID_DB.get("awaiting_dm", [])
             match_idx = None
-            for i, r in enumerate(awaiting):
-                if r.get("tweet_id") and r["tweet_id"] == dm_tweet_id:
-                    match_idx = i
-                    break
+            match_reason = None
+
+            # priority 1: exact tweet ID match
+            if dm_tweet_id:
+                for i, r in enumerate(awaiting):
+                    if r.get("tweet_id") == dm_tweet_id:
+                        match_idx = i
+                        match_reason = f"tweet_id={dm_tweet_id}"
+                        break
+
+            # priority 2: recency — pick most recent awaiting raid within window
+            if match_idx is None and awaiting:
+                now_ts = raid_now().timestamp()
+                for i in range(len(awaiting) - 1, -1, -1):
+                    r = awaiting[i]
+                    age = now_ts - r.get("ts", 0)
+                    if age < RECENCY_MATCH_WINDOW:
+                        match_idx = i
+                        match_reason = f"recency (age={int(age)}s)"
+                        break
 
             if match_idx is None:
-                rdbg(f"DM#1 no match (tid={dm_tweet_id})")
+                rdbg(f"DM#1 no match (tid={dm_tweet_id}, awaiting={len(awaiting)})")
                 return
 
-            # pop from awaiting
             raid = awaiting.pop(match_idx)
             RAID_DB["awaiting_dm"] = awaiting
+            rdbg(f"DM#1 matched raid {raid['raid_id']} by {match_reason}")
 
-            # mark as dm1 received
             raid["dm1_received"] = True
             raid["dm1_time"] = stamp["time12"]
             raid["raidar_dm_msg_id"] = event.message.id
             raid["status"] = "active"
             raid["steps"].append(
                 f"4️⃣ 📩 RAIDAR DM #1 ✅\n"
-                f"   ▸ Matched tweet ID\n"
+                f"   ▸ Matched: {match_reason}\n"
                 f"   ▸ Time: {stamp['time12']}"
             )
 
-            # store DM msg id for later verify
             RAID_DB["current_raid"] = raid
             raid_save_db(RAID_DB)
 
-            # update SMASH LOG card to processing
             if raid.get("log_msg_id"):
                 await raid_edit_log(
                     raid["log_msg_id"],
@@ -1150,27 +1246,17 @@ async def raidar_watcher(event):
                                     f"https://{raid['link']}", raid["steps"], "processing")
                 )
 
-            # kick off reply flow
             if not PROCESSING["active"]:
                 asyncio.create_task(raid_process_queue())
-            else:
-                # if already processing something, queue will pick this up after
-                # but we've already set current_raid. Add to a pending list.
-                pending = RAID_DB.get("pending_dm_matched", [])
-                pending.append(raid["raid_id"])
-                RAID_DB["pending_dm_matched"] = pending
-                raid_save_db(RAID_DB)
-
-            rdbg(f"DM#1 matched raid {raid['raid_id']} — flow started")
             return
 
         # ── DM #2 (XP confirmed)
         if "Reply verified" in text or "Received 3 XP" in text or "XP" in text:
             cur = RAID_DB.get("current_raid")
             if not cur:
-                rdbg("DM#2 no active raid")
+                rdbg("DM#2: no active raid")
                 return
-            # match by tweet id if available
+            # tweet id match (if available)
             cur_tid = cur.get("tweet_id")
             if dm_tweet_id and cur_tid and dm_tweet_id != cur_tid:
                 rdbg(f"DM#2 tid mismatch ({dm_tweet_id} != {cur_tid})")
@@ -1182,7 +1268,7 @@ async def raidar_watcher(event):
             cur["dm2_received"] = True
             cur["dm2_time"] = stamp["time12"]
             cur["steps"].append(
-                f"8️⃣ 🎉 RAIDAR DM #2 — XP CONFIRMED ✅\n"
+                f"9️⃣ 🎉 RAIDAR DM #2 — XP CONFIRMED ✅\n"
                 f"   ▸ \"{text[:80]}\"\n"
                 f"   ▸ Time: {stamp['time12']}"
             )
@@ -1196,7 +1282,6 @@ async def raidar_watcher(event):
                                     f"https://{cur['link']}", cur["steps"], "done")
                 )
 
-            # edit the SAME DM to step 5 (success)
             if cur.get("dm_msg_id"):
                 success_text = dm_build_step5_success(
                     cur["raid_id"], cur["chat_name"],
@@ -1219,15 +1304,15 @@ async def raidar_watcher(event):
             rdbg(f"raid {cur['raid_id']} WON")
             return
 
-        rdbg(f"raidar DM unknown: {text[:80]}")
+        rdbg(f"raidar DM unknown pattern: {text[:80]}")
     except Exception as e:
         print(f"[cryptoraid] raidar watcher err: {e}")
 
-print("[cryptoraid] MODULE LOADED — chunk 3A")
+print("[cryptoraid] MODULE LOADED — chunk 3B")
 
-# ═══ END OF CHUNK 3A ═══
+# ═══ END OF CHUNK 3B ═══
 # ═══════════════════════════════════════════════════════════════
-#  PROCESS QUEUE — flow starts when Raidar DM #1 matched
+#  PROCESS QUEUE — flow runs when Raidar DM #1 matched
 # ═══════════════════════════════════════════════════════════════
 
 async def raid_process_queue():
@@ -1298,7 +1383,6 @@ async def raid_process_queue():
                     Button.inline("4️⃣", b"copy:3"),
                 ]]
 
-                # send new DM
                 dm_msg = await raid_dm_owner(step1_text, dm_buttons)
                 if not dm_msg:
                     raid["steps"][-1] = f"6️⃣ ❌ DM FAILED — bot offline"
@@ -1323,7 +1407,7 @@ async def raid_process_queue():
                         raid_build_card(raid_id, chat_name, f"https://{link}", raid["steps"], "waiting")
                     )
 
-                # ─── WAIT for Done tap (15 min max)
+                # ─── WAIT for Done tap
                 for _ in range(MANUAL_DONE_TIMEOUT * 2):
                     await asyncio.sleep(0.5)
                     cur = RAID_DB.get("current_raid")
@@ -1333,7 +1417,6 @@ async def raid_process_queue():
 
                 raid = RAID_DB.get("current_raid", raid)
                 if not raid.get("manual_done"):
-                    # timeout
                     raid["steps"].append(f"⏰ TIMEOUT — no Done tap in {MANUAL_DONE_TIMEOUT//60} min")
                     if log_msg_id:
                         await raid_edit_log(
@@ -1347,7 +1430,7 @@ async def raid_process_queue():
                 # ─── user tapped Done → wait 10s
                 raid["steps"].append(
                     f"7️⃣ ✅ YOU POSTED IT\n"
-                    f"   ▸ Chosen reply: `{raid.get('chosen_reply', '?')[:60]}`\n"
+                    f"   ▸ Reply: `{raid.get('chosen_reply', '?')[:60]}`\n"
                     f"   ▸ Time: {raid_now().strftime('%I:%M:%S %p')}"
                 )
                 raid["steps"].append(f"8️⃣ ⏳ WAITING {VERIFY_WAIT_AFTER_DONE}s...")
@@ -1374,7 +1457,7 @@ async def raid_process_queue():
                                     if "Verify" in btxt or "✅" in btxt:
                                         await msg.click(r_idx, c_idx)
                                         verify_clicked = True
-                                        rdbg(f"clicked Verify on Raidar DM")
+                                        rdbg(f"clicked Verify on Raidar DM ({raidar_msg_id})")
                                         break
                                 if verify_clicked:
                                     break
@@ -1401,12 +1484,12 @@ async def raid_process_queue():
                         raid_build_card(raid_id, chat_name, f"https://{link}", raid["steps"], "processing")
                     )
 
-                # ─── edit the DM to step 4 (verify status)
+                # ─── edit DM to step 4
                 if raid.get("dm_msg_id"):
                     step4_text = dm_build_step4(raid_id, chat_name, verify_clicked)
                     await raid_edit_dm(raid["dm_msg_id"], step4_text, buttons=None)
 
-                # ─── wait for DM #2 (XP confirmation)
+                # ─── wait for DM #2
                 raid["steps"].append(f"⏳ WAITING FOR RAIDAR DM #2 ({DM2_WAIT_SECONDS}s)...")
                 RAID_DB["current_raid"] = raid
                 raid_save_db(RAID_DB)
@@ -1425,7 +1508,6 @@ async def raid_process_queue():
 
                 raid = RAID_DB.get("current_raid", raid)
                 if not raid.get("dm2_received"):
-                    # ─── FAILED
                     reason_lines = []
                     if not raid.get("dm1_received"):
                         reason_lines.append("▸ Raidar DM #1 was never received")
@@ -1461,7 +1543,6 @@ async def raid_process_queue():
                     })
                     RAID_DB["failed"] = failed[-50:]
 
-                    # edit the DM to step 5 fail
                     if raid.get("dm_msg_id"):
                         fail_text = dm_build_step5_fail(
                             raid_id, chat_name,
@@ -1500,15 +1581,16 @@ try:
 except Exception as e:
     print(f"[cryptoraid] bootstrap init err: {e}")
 
-print("[cryptoraid] MODULE LOADED SUCCESSFULLY — v7.0 ready")
+print("[cryptoraid] MODULE LOADED SUCCESSFULLY — v7.1 ready")
 
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║  === END OF CRYPTORAID v7.0 ===                              ║
+# ║  === END OF CRYPTORAID v7.1 ===                              ║
 # ║                                                              ║
 # ║  Flow:                                                       ║
 # ║   1. Smash → store as awaiting_dm                            ║
-# ║   2. Raidar DM arrives → match by tweet_id                   ║
+# ║   2. Raidar DM arrives → multi-source link extract           ║
+# ║      → match by tweet_id OR recency fallback                 ║
 # ║   3. Activate raid → send ONE DM (step 1: pick a reply)      ║
 # ║   4. You tap a number → DM EDIT → step 2 (copy + Open + Done)║
 # ║   5. You tap Done → DM EDIT → step 3 (waiting 10s)           ║
@@ -1516,14 +1598,11 @@ print("[cryptoraid] MODULE LOADED SUCCESSFULLY — v7.0 ready")
 # ║   7. DM EDIT → step 4 (verify status)                        ║
 # ║   8. DM #2 → DM EDIT → step 5 (WON / FAILED)                 ║
 # ║                                                              ║
-# ║  Features:                                                   ║
-# ║   • One DM per raid, edited at each step                     ║
+# ║  Fixes:                                                      ║
+# ║   • Multi-source link extraction (text/preview/entities/btn) ║
+# ║   • Recency fallback when link extraction fails              ║
+# ║   • Verify on Raidar DM (correct message)                    ║
+# ║   • One DM, edited 5 times                                   ║
 # ║   • Progress dots ●●●○○                                       ║
-# ║   • Verify clicked on Raidar DM (correct message)            ║
-# ║   • 10s wait (not 30s) after Done                            ║
-# ║   • Tone-matched replies (no forced pidgin)                  ║
-# ║   • Tweet ID matching (survives DM floods)                   ║
-# ║   • SMASH LOG card compact + NEXT STEP                       ║
-# ║   • Natural language commands in DM                          ║
+# ║   • 10s wait, not 30s                                        ║
 # ╚══════════════════════════════════════════════════════════════╝
-
