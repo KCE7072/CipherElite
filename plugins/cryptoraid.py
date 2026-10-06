@@ -1,11 +1,13 @@
+
 # =============================================================================
-#  CipherElite Plugin - cryptoraid v7.1
-#  Multi-source link extraction + recency fallback + one-DM edited flow
+#  CipherElite Plugin - cryptoraid v7.2
+#  Robust Verify click + one-DM edited flow
 # =============================================================================
 
 from telethon import events, Button, TelegramClient
 from telethon.errors import FloodWaitError
 from telethon.tl import functions
+from telethon.tl.functions.messages import GetBotCallbackAnswerRequest
 from utils.utils import CipherElite
 from utils.decorators import rishabh
 from plugins.bot import add_handler
@@ -19,9 +21,9 @@ import aiohttp
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-print("[cryptoraid] IMPORTING v7.1")
+print("[cryptoraid] IMPORTING v7.2")
 
-VERSION = "7.1.0"
+VERSION = "7.2.0"
 CATEGORY = "utilities"
 
 RAID_WAT = timezone(timedelta(hours=1))
@@ -42,7 +44,7 @@ SMASH_BUTTON = '👊'
 OTHER_TARGETS = ['🤛', '✊', '🤜', 'Verify', 'Verified', '✅', 'Confirmed']
 
 VERIFY_WAIT_AFTER_DONE = 10
-DM2_WAIT_SECONDS = 60
+DM2_WAIT_SECONDS = 15
 MANUAL_DONE_TIMEOUT = 900
 RECENCY_MATCH_WINDOW = 60
 DEBUG = True
@@ -141,11 +143,8 @@ def raid_tweet_id(url):
 
 
 def raid_extract_link_from_msg(msg):
-    """Try MULTIPLE sources for x/twitter link from a message object."""
     if not msg:
         return None
-
-    # 1) text body
     try:
         text = getattr(msg, "raw_text", None) or getattr(msg, "message", None) or ""
         urls = raid_extract_x_urls(text)
@@ -153,8 +152,6 @@ def raid_extract_link_from_msg(msg):
             return urls[0]
     except Exception:
         pass
-
-    # 2) web preview
     try:
         wp = getattr(msg, "web_preview", None)
         if wp:
@@ -164,18 +161,13 @@ def raid_extract_link_from_msg(msg):
                     return raid_norm_url(val)
     except Exception:
         pass
-
-    # 3) entities (URL entities)
     try:
-        entities = getattr(msg, "entities", None) or []
-        for ent in entities:
+        for ent in (getattr(msg, "entities", None) or []):
             ent_url = getattr(ent, "url", None)
             if ent_url and ("x.com" in ent_url or "twitter.com" in ent_url):
                 return raid_norm_url(ent_url)
     except Exception:
         pass
-
-    # 4) button URLs
     try:
         buttons = getattr(msg, "buttons", None)
         if buttons:
@@ -186,8 +178,6 @@ def raid_extract_link_from_msg(msg):
                         return raid_norm_url(burl)
     except Exception:
         pass
-
-    # 5) reply_to_msg_id chain — check if the message replies to one with a link
     return None
 
 
@@ -245,6 +235,111 @@ async def raid_fetch_tweet(url):
 
 
 # ═══════════════════════════════════════════════════════════════
+#  VERIFY CLICK — robust, multiple fallbacks
+# ═══════════════════════════════════════════════════════════════
+
+async def raid_try_verify(raidar_msg_id):
+    """Try hard to click the Verify button on the Raidar DM."""
+    if not raidar_msg_id:
+        rdbg("verify: no msg_id")
+        return False
+
+    try:
+        msg = await CipherElite.get_messages(RAIDAR_USER_ID, ids=raidar_msg_id)
+        if not msg:
+            rdbg(f"verify: msg {raidar_msg_id} not found")
+            return False
+
+        buttons = getattr(msg, "buttons", None)
+        if not buttons:
+            rdbg(f"verify: msg {raidar_msg_id} has NO buttons")
+            return False
+
+        # log all buttons
+        flat = []
+        for r_idx, row in enumerate(buttons):
+            for c_idx, btn in enumerate(row):
+                btxt = (getattr(btn, "text", "") or "").strip()
+                flat.append((r_idx, c_idx, btxt))
+        rdbg(f"verify: buttons on msg = {[(r,c,t) for r,c,t in flat]}")
+
+        # match priority
+        target = None
+        for r, c, btxt in flat:
+            low = btxt.lower()
+            if "verify" in low:
+                target = (r, c, btxt)
+                rdbg(f"verify: matched 'verify' → {btxt} at ({r},{c})")
+                break
+        if target is None:
+            for r, c, btxt in flat:
+                if any(ch in btxt for ch in ("✅", "✓", "✔", "☑")):
+                    target = (r, c, btxt)
+                    rdbg(f"verify: matched check-mark → {btxt} at ({r},{c})")
+                    break
+        if target is None:
+            for r, c, btxt in flat:
+                low = btxt.lower()
+                if any(k in low for k in ("confirm", "submit", "done")):
+                    target = (r, c, btxt)
+                    rdbg(f"verify: matched alt-text → {btxt} at ({r},{c})")
+                    break
+        if target is None and flat:
+            r, c, btxt = flat[-1]
+            target = (r, c, btxt)
+            rdbg(f"verify: FALLBACK to last button {btxt} at ({r},{c})")
+
+        if not target:
+            rdbg("verify: no target found")
+            return False
+
+        r_idx, c_idx, btxt = target
+
+        # ── attempt 1: msg.click()
+        try:
+            await msg.click(r_idx, c_idx)
+            rdbg(f"verify: msg.click OK ({r_idx},{c_idx})")
+            return True
+        except Exception as e1:
+            rdbg(f"verify: msg.click failed: {e1}")
+
+        # ── attempt 2: raw GetBotCallbackAnswerRequest
+        try:
+            btn_obj = buttons[r_idx][c_idx]
+            data = getattr(btn_obj, "data", None)
+            if data:
+                await CipherElite(GetBotCallbackAnswerRequest(
+                    peer=RAIDAR_USER_ID,
+                    msg_id=raidar_msg_id,
+                    data=data,
+                ))
+                rdbg(f"verify: raw callback OK ({r_idx},{c_idx})")
+                return True
+            else:
+                rdbg("verify: no callback data on button")
+        except Exception as e2:
+            rdbg(f"verify: raw callback failed: {e2}")
+
+        # ── attempt 3: refetch + click
+        try:
+            await asyncio.sleep(1)
+            msg2 = await CipherElite.get_messages(RAIDAR_USER_ID, ids=raidar_msg_id)
+            if msg2 and msg2.buttons:
+                await msg2.click(r_idx, c_idx)
+                rdbg(f"verify: refetch+click OK")
+                return True
+        except Exception as e3:
+            rdbg(f"verify: refetch+click failed: {e3}")
+
+        rdbg("verify: ALL attempts failed")
+        return False
+
+    except Exception as e:
+        print(f"[cryptoraid] verify outer err: {e}")
+        return False
+
+
+# ═══════════════════════════════════════════════════════════════
 #  LOG SENDERS
 # ═══════════════════════════════════════════════════════════════
 
@@ -294,25 +389,9 @@ def raid_build_card(raid_id, chat_name, link, steps, status="processing"):
         f"║  🕐  {raid_now().strftime('%I:%M:%S %p')} WAT\n"
         "╚══════════════════════════════════════╝"
     )
-
     body = ""
     for s in steps:
-        if "ORIGINAL POST" in s and "▸" in s:
-            lines = s.split("\n")
-            new_lines = []
-            for ln in lines:
-                if ln.strip().startswith("▸"):
-                    m = re.search(r'"(.*)"', ln)
-                    if m:
-                        short = raid_short_preview(m.group(1), 60)
-                        new_lines.append(f'   ▸ "{short}"')
-                    else:
-                        new_lines.append(ln[:90])
-                else:
-                    new_lines.append(ln)
-            s = "\n".join(new_lines)
         body += "\n" + s + "\n"
-
     footer = (
         "\n━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🎯 {next_step}\n"
@@ -324,7 +403,7 @@ def raid_build_card(raid_id, chat_name, link, steps, status="processing"):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  DM BUILDER — one DM, edited at each step
+#  DM BUILDERS
 # ═══════════════════════════════════════════════════════════════
 
 def dm_step_header(raid_id, chat_name, step_num, total_steps=5):
@@ -340,37 +419,35 @@ def dm_step_header(raid_id, chat_name, step_num, total_steps=5):
     )
 
 
-def dm_tweet_block(tweet_data, tweet_text, tweet_author, max_len=400):
-    if not tweet_text:
+def dm_tweet_block(td, tt, ta, max_len=400):
+    if not tt:
         return "📝 ORIGINAL POST\n▸ (content unavailable)\n"
     return (
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"📝 @{tweet_author}\n"
-        f"💬 {tweet_text[:max_len]}\n"
-        f"❤️ {tweet_data.get('likes', 0)}  🔁 {tweet_data.get('retweets', 0)}\n"
+        f"📝 @{ta}\n"
+        f"💬 {tt[:max_len]}\n"
+        f"❤️ {td.get('likes', 0)}  🔁 {td.get('retweets', 0)}\n"
     )
 
 
-def dm_build_step1(raid_id, chat_name, tweet_data, tweet_text, tweet_author, replies):
-    header = dm_step_header(raid_id, chat_name, 1)
-    tweet = dm_tweet_block(tweet_data, tweet_text, tweet_author)
-    reply_list = "\n".join([f"**{i+1}.** {r}" for i, r in enumerate(replies)])
+def dm_build_step1(raid_id, chat_name, td, tt, ta, replies):
+    h = dm_step_header(raid_id, chat_name, 1)
+    tb = dm_tweet_block(td, tt, ta)
+    rl = "\n".join([f"**{i+1}.** {r}" for i, r in enumerate(replies)])
     return (
-        f"{header}\n"
-        f"{tweet}"
-        "\n🎯 **PICK A REPLY**\n\n"
-        f"{reply_list}\n\n"
+        f"{h}\n{tb}\n"
+        "🎯 **PICK A REPLY**\n\n"
+        f"{rl}\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "  👇 Tap a number to select"
     )
 
 
-def dm_build_step2(raid_id, chat_name, tweet_data, tweet_text, tweet_author, idx, chosen):
-    header = dm_step_header(raid_id, chat_name, 2)
-    tweet = dm_tweet_block(tweet_data, tweet_text, tweet_author, max_len=250)
+def dm_build_step2(raid_id, chat_name, td, tt, ta, idx, chosen):
+    h = dm_step_header(raid_id, chat_name, 2)
+    tb = dm_tweet_block(td, tt, ta, max_len=250)
     return (
-        f"{header}\n"
-        f"{tweet}"
+        f"{h}\n{tb}"
         f"\n📋 **REPLY #{idx+1}** — tap to copy\n\n"
         f"`{chosen}`\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -382,9 +459,9 @@ def dm_build_step2(raid_id, chat_name, tweet_data, tweet_text, tweet_author, idx
 
 
 def dm_build_step3(raid_id, chat_name, chosen):
-    header = dm_step_header(raid_id, chat_name, 3)
+    h = dm_step_header(raid_id, chat_name, 3)
     return (
-        f"{header}\n"
+        f"{h}\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "⏳ **WAITING TO VERIFY**\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -396,16 +473,14 @@ def dm_build_step3(raid_id, chat_name, chosen):
 
 
 def dm_build_step4(raid_id, chat_name, verify_ok):
-    header = dm_step_header(raid_id, chat_name, 4)
+    h = dm_step_header(raid_id, chat_name, 4)
     status_line = (
-        "✅ **VERIFY CLICKED**\n"
-        "▸ Waiting for Raidar DM #2..."
+        "✅ **VERIFY CLICKED**\n▸ Waiting for Raidar DM #2..."
         if verify_ok else
-        "⚠️ **VERIFY BUTTON NOT FOUND**\n"
-        "▸ Waiting for Raidar DM #2 anyway..."
+        "⚠️ **VERIFY NOT CLICKED**\n▸ Waiting for Raidar DM #2 anyway..."
     )
     return (
-        f"{header}\n"
+        f"{h}\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"{status_line}\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -415,30 +490,26 @@ def dm_build_step4(raid_id, chat_name, verify_ok):
     )
 
 
-def dm_build_step5_success(raid_id, chat_name, chosen, tweet_data, tweet_text, tweet_author):
-    header = dm_step_header(raid_id, chat_name, 5)
-    tweet = dm_tweet_block(tweet_data, tweet_text, tweet_author, max_len=200)
+def dm_build_step5_success(raid_id, chat_name, chosen, td, tt, ta):
+    h = dm_step_header(raid_id, chat_name, 5)
+    tb = dm_tweet_block(td, tt, ta, max_len=200)
     return (
-        f"{header}\n"
-        f"{tweet}"
-        f"\n📋 **YOUR REPLY**\n\n"
-        f"`{chosen}`\n\n"
+        f"{h}\n{tb}"
+        f"\n📋 **YOUR REPLY**\n\n`{chosen}`\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "✅ **XP CONFIRMED**\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "▸ Raidar verified your reply\n"
         "▸ +3 XP added to your account\n\n"
-        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🎉 All done — watching for next raid"
     )
 
 
 def dm_build_step5_fail(raid_id, chat_name, chosen, fail_reasons):
-    header = dm_step_header(raid_id, chat_name, 5)
+    h = dm_step_header(raid_id, chat_name, 5)
     return (
-        f"{header}\n"
-        f"\n📋 **YOUR REPLY**\n\n"
-        f"`{chosen or '(not selected)'}`\n\n"
+        f"{h}\n\n"
+        f"📋 **YOUR REPLY**\n\n`{chosen or '(not selected)'}`\n\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         "🚨 **WHY IT FAILED**\n"
         "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
@@ -533,7 +604,7 @@ def init(client_instance):
         "..wl off - remove whitelist",
         "..wl list - list whitelisted",
     ]
-    add_handler("cryptoraid", commands, "🎯 Raid v7.1 — multi-source match")
+    add_handler("cryptoraid", commands, "🎯 Raid v7.2 — robust verify")
     print("[cryptoraid] commands registered")
 
 print("[cryptoraid] MODULE LOADED — chunk 1")
@@ -622,7 +693,7 @@ async def cmd_status(event):
         paused = RAID_DB.get("paused", False)
         bot_st = "✅ online" if (QUEUE_BOT and QUEUE_BOT.is_connected()) else "❌ offline"
         msg = (
-            f"🎯 **Crypto Raid v7.1**\n"
+            f"🎯 **Crypto Raid v7.2**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"{'⏸️ PAUSED' if paused else '✅ Active'}\n"
             f"👊 Smashes: `{RAID_DB.get('count', 0)}`\n"
@@ -829,7 +900,7 @@ async def raid_handle_cb(event, data):
             ]
             try:
                 await event.edit(step2_text, buttons=step2_buttons)
-                rdbg(f"edit DM → step 2")
+                rdbg("edit DM → step 2")
             except Exception as e:
                 rdbg(f"edit err: {e}, fallback new msg")
                 try:
@@ -862,7 +933,7 @@ async def raid_handle_cb(event, data):
             )
             try:
                 await event.edit(step3_text, buttons=None)
-                rdbg(f"edit DM → step 3")
+                rdbg("edit DM → step 3")
             except Exception as e:
                 rdbg(f"edit err step3: {e}")
         except Exception as e:
@@ -955,7 +1026,6 @@ print("[cryptoraid] MODULE LOADED — chunk 2")
 # ═══ END OF CHUNK 2 ═══
 # ═══════════════════════════════════════════════════════════════
 #  SMASH DETECTOR — ALL groups
-#  Multi-source link extraction (text + web_preview + entities + buttons)
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage)
@@ -969,10 +1039,9 @@ async def raid_detector(event):
         if not raid_has_intent(text):
             return
 
-        # ─── multi-source link extraction
+        # multi-source link extraction
         urls = raid_extract_x_urls(text)
 
-        # fallback: web preview
         if not urls:
             try:
                 wp = getattr(event.message, "web_preview", None)
@@ -986,7 +1055,6 @@ async def raid_detector(event):
             except Exception:
                 pass
 
-        # fallback: entities
         if not urls:
             try:
                 for ent in (event.message.entities or []):
@@ -998,7 +1066,6 @@ async def raid_detector(event):
             except Exception:
                 pass
 
-        # fallback: button URLs
         if not urls and event.buttons:
             try:
                 for row in event.buttons:
@@ -1014,7 +1081,6 @@ async def raid_detector(event):
                 pass
 
         if not urls:
-            rdbg("no x link found in message")
             return
 
         smashed = RAID_DB.get("smashed", {})
@@ -1077,7 +1143,7 @@ async def raid_detector(event):
         is_wl = raid_is_wl(chat_id)
         tweet_id = raid_tweet_id(new_urls[0])
 
-        # ─── NOT whitelisted
+        # NOT whitelisted
         if not is_wl:
             tweet_data = await raid_fetch_tweet(new_urls[0])
             tweet_text = (tweet_data or {}).get("text", "")
@@ -1090,7 +1156,7 @@ async def raid_detector(event):
             ]
             steps.append(
                 f"2️⃣ ⛔ WHITELIST SKIP\n"
-                f"   ▸ '{chat_name}' not in reply whitelist\n"
+                f"   ▸ '{chat_name}' not whitelisted\n"
                 f"   ▸ Smash logged only"
             )
             if tweet_text:
@@ -1102,7 +1168,7 @@ async def raid_detector(event):
             await raid_send_log(card)
             return
 
-        # ─── Whitelisted
+        # whitelisted
         tweet_data = await raid_fetch_tweet(new_urls[0])
         tweet_text = (tweet_data or {}).get("text", "")
         tweet_author = (tweet_data or {}).get("author", "")
@@ -1178,8 +1244,6 @@ print("[cryptoraid] MODULE LOADED — chunk 3A")
 # ═══ END OF CHUNK 3A ═══
 # ═══════════════════════════════════════════════════════════════
 #  RAIDAR DM WATCHER
-#  DM #1 → activate raid (match by tweet_id OR recency)
-#  DM #2 → XP confirmation
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage(from_users=RAIDAR_USER_ID))
@@ -1188,7 +1252,6 @@ async def raidar_watcher(event):
         text = event.raw_text or ""
         stamp = raid_now_dict()
 
-        # ─── multi-source link extraction from the DM
         dm_link = raid_extract_link_from_msg(event.message)
         dm_tweet_id = raid_tweet_id(dm_link) if dm_link else None
         rdbg(f"raidar DM: link={dm_link} tid={dm_tweet_id}")
@@ -1207,7 +1270,7 @@ async def raidar_watcher(event):
                         match_reason = f"tweet_id={dm_tweet_id}"
                         break
 
-            # priority 2: recency — pick most recent awaiting raid within window
+            # priority 2: recency fallback
             if match_idx is None and awaiting:
                 now_ts = raid_now().timestamp()
                 for i in range(len(awaiting) - 1, -1, -1):
@@ -1233,6 +1296,7 @@ async def raidar_watcher(event):
             raid["steps"].append(
                 f"4️⃣ 📩 RAIDAR DM #1 ✅\n"
                 f"   ▸ Matched: {match_reason}\n"
+                f"   ▸ Raidar msg_id: {event.message.id}\n"
                 f"   ▸ Time: {stamp['time12']}"
             )
 
@@ -1256,7 +1320,6 @@ async def raidar_watcher(event):
             if not cur:
                 rdbg("DM#2: no active raid")
                 return
-            # tweet id match (if available)
             cur_tid = cur.get("tweet_id")
             if dm_tweet_id and cur_tid and dm_tweet_id != cur_tid:
                 rdbg(f"DM#2 tid mismatch ({dm_tweet_id} != {cur_tid})")
@@ -1304,7 +1367,7 @@ async def raidar_watcher(event):
             rdbg(f"raid {cur['raid_id']} WON")
             return
 
-        rdbg(f"raidar DM unknown pattern: {text[:80]}")
+        rdbg(f"raidar DM unknown: {text[:80]}")
     except Exception as e:
         print(f"[cryptoraid] raidar watcher err: {e}")
 
@@ -1312,7 +1375,7 @@ print("[cryptoraid] MODULE LOADED — chunk 3B")
 
 # ═══ END OF CHUNK 3B ═══
 # ═══════════════════════════════════════════════════════════════
-#  PROCESS QUEUE — flow runs when Raidar DM #1 matched
+#  PROCESS QUEUE
 # ═══════════════════════════════════════════════════════════════
 
 async def raid_process_queue():
@@ -1333,7 +1396,7 @@ async def raid_process_queue():
             log_msg_id = raid.get("log_msg_id")
 
             try:
-                # ─── generate 4 replies
+                # generate replies
                 raid["steps"].append(f"5️⃣ 🧠 GENERATING 4 REPLIES...")
                 RAID_DB["current_raid"] = raid
                 raid_save_db(RAID_DB)
@@ -1360,7 +1423,7 @@ async def raid_process_queue():
                         raid_build_card(raid_id, chat_name, f"https://{link}", raid["steps"], "processing")
                     )
 
-                # ─── send step 1 DM
+                # send step 1 DM
                 raid["steps"].append(f"6️⃣ 📱 SENDING DM...")
                 RAID_DB["current_raid"] = raid
                 raid_save_db(RAID_DB)
@@ -1407,7 +1470,7 @@ async def raid_process_queue():
                         raid_build_card(raid_id, chat_name, f"https://{link}", raid["steps"], "waiting")
                     )
 
-                # ─── WAIT for Done tap
+                # wait for Done tap
                 for _ in range(MANUAL_DONE_TIMEOUT * 2):
                     await asyncio.sleep(0.5)
                     cur = RAID_DB.get("current_raid")
@@ -1417,7 +1480,7 @@ async def raid_process_queue():
 
                 raid = RAID_DB.get("current_raid", raid)
                 if not raid.get("manual_done"):
-                    raid["steps"].append(f"⏰ TIMEOUT — no Done tap in {MANUAL_DONE_TIMEOUT//60} min")
+                    raid["steps"].append(f"⏰ TIMEOUT — no Done tap")
                     if log_msg_id:
                         await raid_edit_log(
                             log_msg_id,
@@ -1427,7 +1490,7 @@ async def raid_process_queue():
                     raid_save_db(RAID_DB)
                     continue
 
-                # ─── user tapped Done → wait 10s
+                # user tapped Done → wait 10s
                 raid["steps"].append(
                     f"7️⃣ ✅ YOU POSTED IT\n"
                     f"   ▸ Reply: `{raid.get('chosen_reply', '?')[:60]}`\n"
@@ -1444,29 +1507,8 @@ async def raid_process_queue():
 
                 await asyncio.sleep(VERIFY_WAIT_AFTER_DONE)
 
-                # ─── click Verify on the RAIDAR DM (stored earlier)
-                verify_clicked = False
-                try:
-                    raidar_msg_id = raid.get("raidar_dm_msg_id")
-                    if raidar_msg_id:
-                        msg = await CipherElite.get_messages(RAIDAR_USER_ID, ids=raidar_msg_id)
-                        if msg and msg.buttons:
-                            for r_idx, row in enumerate(msg.buttons):
-                                for c_idx, btn in enumerate(row):
-                                    btxt = (getattr(btn, "text", "") or "").strip()
-                                    if "Verify" in btxt or "✅" in btxt:
-                                        await msg.click(r_idx, c_idx)
-                                        verify_clicked = True
-                                        rdbg(f"clicked Verify on Raidar DM ({raidar_msg_id})")
-                                        break
-                                if verify_clicked:
-                                    break
-                        else:
-                            rdbg(f"no buttons on raidar msg {raidar_msg_id}")
-                    else:
-                        rdbg("no raidar_dm_msg_id stored")
-                except Exception as e:
-                    print(f"[cryptoraid] verify err: {e}")
+                # ─── VERIFY CLICK — uses robust helper
+                verify_clicked = await raid_try_verify(raid.get("raidar_dm_msg_id"))
 
                 if verify_clicked:
                     raid["steps"][-1] = (
@@ -1484,12 +1526,12 @@ async def raid_process_queue():
                         raid_build_card(raid_id, chat_name, f"https://{link}", raid["steps"], "processing")
                     )
 
-                # ─── edit DM to step 4
+                # edit DM step 4
                 if raid.get("dm_msg_id"):
                     step4_text = dm_build_step4(raid_id, chat_name, verify_clicked)
                     await raid_edit_dm(raid["dm_msg_id"], step4_text, buttons=None)
 
-                # ─── wait for DM #2
+                # wait for DM #2
                 raid["steps"].append(f"⏳ WAITING FOR RAIDAR DM #2 ({DM2_WAIT_SECONDS}s)...")
                 RAID_DB["current_raid"] = raid
                 raid_save_db(RAID_DB)
@@ -1514,7 +1556,7 @@ async def raid_process_queue():
                     if not raid.get("manual_done"):
                         reason_lines.append("▸ Done button was never tapped")
                     if not raid.get("verify_clicked"):
-                        reason_lines.append("▸ Verify button was not found on Raidar DM")
+                        reason_lines.append("▸ Verify button was not clicked")
                     if not raid.get("chosen_reply"):
                         reason_lines.append("▸ No reply was selected")
                     if not reason_lines:
@@ -1581,28 +1623,22 @@ try:
 except Exception as e:
     print(f"[cryptoraid] bootstrap init err: {e}")
 
-print("[cryptoraid] MODULE LOADED SUCCESSFULLY — v7.1 ready")
+print("[cryptoraid] MODULE LOADED SUCCESSFULLY — v7.2 ready")
 
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║  === END OF CRYPTORAID v7.1 ===                              ║
+# ║  === END OF CRYPTORAID v7.2 ===                              ║
 # ║                                                              ║
-# ║  Flow:                                                       ║
-# ║   1. Smash → store as awaiting_dm                            ║
-# ║   2. Raidar DM arrives → multi-source link extract           ║
-# ║      → match by tweet_id OR recency fallback                 ║
-# ║   3. Activate raid → send ONE DM (step 1: pick a reply)      ║
-# ║   4. You tap a number → DM EDIT → step 2 (copy + Open + Done)║
-# ║   5. You tap Done → DM EDIT → step 3 (waiting 10s)           ║
-# ║   6. Bot clicks Verify on Raidar DM                          ║
-# ║   7. DM EDIT → step 4 (verify status)                        ║
-# ║   8. DM #2 → DM EDIT → step 5 (WON / FAILED)                 ║
+# ║  VERIFY — 3-attempt strategy:                                ║
+# ║   1. msg.click(r, c)                                         ║
+# ║   2. Raw GetBotCallbackAnswerRequest (bypasses wrapper)      ║
+# ║   3. Refetch message + retry click                           ║
 # ║                                                              ║
-# ║  Fixes:                                                      ║
-# ║   • Multi-source link extraction (text/preview/entities/btn) ║
-# ║   • Recency fallback when link extraction fails              ║
-# ║   • Verify on Raidar DM (correct message)                    ║
-# ║   • One DM, edited 5 times                                   ║
-# ║   • Progress dots ●●●○○                                       ║
-# ║   • 10s wait, not 30s                                        ║
+# ║  Matching — 4 tiers:                                         ║
+# ║   1. Text contains "verify"                                  ║
+# ║   2. Text contains ✅ ✓ ✔ ☑                                  ║
+# ║   3. Text contains confirm/submit/done                       ║
+# ║   4. FALLBACK: last button on the row                        ║
+# ║                                                              ║
+# ║  Console logs ALL button texts for debugging                 ║
 # ╚══════════════════════════════════════════════════════════════╝
