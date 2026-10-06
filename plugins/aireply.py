@@ -1,10 +1,10 @@
+
 # =============================================================================
-#  CipherElite Userbot Plugin - aireply.py v3.0
-#  AI replies + queue buttons + quiz mode + wallet drop + WAT timezone
-#  Stage 2 complete
+#  CipherElite Userbot Plugin - aireply.py v3.2
+#  Full learning: group memory + room reading + persona + aggressive + slow
 # =============================================================================
 
-from telethon import events, Button, TelegramClient
+from telethon import events
 from telethon.errors import FloodWaitError
 from telethon.tl import functions
 from utils.utils import CipherElite
@@ -16,17 +16,16 @@ import json
 import re
 import os
 import random
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from google import genai
 from google.genai import types
 
-VERSION = "3.0.0"
-CATEGORY = "utilities"
+print("[aireply] IMPORTING v3.2")
 
-# ═══════════════════════════════════════════════════════════════
-#  TIMEZONE
-# ═══════════════════════════════════════════════════════════════
+VERSION = "3.2.0"
+CATEGORY = "utilities"
 
 WAT = timezone(timedelta(hours=1))
 
@@ -46,6 +45,13 @@ MIN_GAP_SAME_USER = 0
 RATE_LIMIT_HOURLY = 20
 RATE_LIMIT_DAILY = 150
 DEBUG = True
+
+# Aggressive mode overrides
+AGGRESSIVE_SPEED = (1, 2)
+AGGRESSIVE_GAP = 5
+AGGRESSIVE_HOURLY = 60
+AGGRESSIVE_REACT_PROB = 0.6
+AGGRESSIVE_MIN_WORDS = 3      # any message with 3+ words triggers
 
 SPEED_MODES = {
     "fast": (1, 3),
@@ -68,23 +74,20 @@ DM_ALERT_KEYWORDS = [
     'automated', 'script', 'kce', 'cipher', 'reply bot'
 ]
 
-# ── Quiz mode
-QUIZ_CORRECT_RATIO = 4          # 4 correct
-QUIZ_WRONG_RATIO = 1            # : 1 wrong
-QUIZ_WRONG_EMOJIS = ["💀", "😂"]
-
-# Signals from mods that indicate a correct answer
-QUIZ_CORRECT_SIGNALS = [
-    'correct', '✅', 'right', 'yes', 'winner', 'win', 'spot on',
-    'accurate', 'correcto', '✔', '👍'
-]
-
-# ── Wallet regex
 WALLET_PATTERNS = {
     'sol': re.compile(r'\b[1-9A-HJ-NP-Za-km-z]{32,44}\b'),
     'evm': re.compile(r'\b0x[a-fA-F0-9]{40}\b'),
     'sui': re.compile(r'\b0x[a-fA-F0-9]{64}\b'),
 }
+
+# ── Learning config
+LEARN_BATCH_SECONDS = 60       # group memory batches
+LEARN_MAX_PHRASES = 30
+LEARN_MAX_TOPICS = 20
+ACTIVITY_WINDOW = 300          # seconds rolling
+SLOW_MODE_THRESHOLD = 5        # distinct typers
+SLOW_MODE_EXTRA_DELAY = 10     # seconds
+SLOW_MODE_RESET = 3            # drop below this resets
 
 SYSTEM_PROMPT = """You are KCE — a real Nigerian guy in a crypto Telegram group. You're not helpful. You're not polite. You're just vibing.
 
@@ -129,23 +132,6 @@ DB_DIR = PROJECT_ROOT / "DB"
 DB_DIR.mkdir(exist_ok=True)
 DB_FILE = DB_DIR / "aireply.json"
 WALLET_FILE = DB_DIR / "aireply_wallets.json"
-BOT_SESSION_FILE = DB_DIR / "queue_bot"
-QUEUE_BOT_CONFIG_FILE = DB_DIR / "queue_bot_config.json"
-
-
-def _load_bot_token():
-    try:
-        if QUEUE_BOT_CONFIG_FILE.exists():
-            data = json.loads(QUEUE_BOT_CONFIG_FILE.read_text(encoding="utf-8"))
-            tok = data.get("token", "").strip()
-            if tok:
-                return tok
-    except Exception as e:
-        print(f"[aireply] bot config load error: {e}")
-    return ""
-
-
-QUEUE_BOT_TOKEN = _load_bot_token()
 
 
 def load_db():
@@ -153,7 +139,7 @@ def load_db():
         if DB_FILE.exists():
             return json.loads(DB_FILE.read_text(encoding="utf-8"))
     except Exception as e:
-        print(f"[aireply] load error: {e}")
+        print(f"[aireply] load err: {e}")
     return {
         "whitelist": [],
         "replies": [],
@@ -162,13 +148,12 @@ def load_db():
         "daily": {"date": "", "count": 0},
         "dm_blacklist": [],
         "dm_whitelist": [],
-        # v3 flags per group
-        "quiz_groups": [],       # list of chat_ids with quiz mode ON
-        "wallet_groups": [],     # list of chat_ids with wallet drop ON
-        "reply_groups": [],      # list of chat_ids where bot replies (already whitelist)
-        "trusted_mods": {},      # {chat_id: [user_id, ...]} — extra trusted mods beyond admins
-        # quiz state per group
-        "quiz_state": {},        # {chat_id: {"seen": [...], "learned_style": "...", "counter": 0}}
+        "wallet_groups": [],
+        "group_memory": {},
+        "persona_phrases": [],
+        "aggressive": False,
+        "slow_mode_until": 0,
+        "admin_last_seen": {},
         "started": wat_now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -177,7 +162,7 @@ def save_db(data):
     try:
         DB_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception as e:
-        print(f"[aireply] save error: {e}")
+        print(f"[aireply] save err: {e}")
 
 
 DB = load_db()
@@ -188,7 +173,7 @@ def load_wallets():
         if WALLET_FILE.exists():
             return json.loads(WALLET_FILE.read_text(encoding="utf-8"))
     except Exception as e:
-        print(f"[aireply] wallet load error: {e}")
+        print(f"[aireply] wallet load err: {e}")
     return {"sol": "", "evm": "", "sui": ""}
 
 
@@ -196,26 +181,25 @@ def save_wallets(data):
     try:
         WALLET_FILE.write_text(json.dumps(data, indent=2), encoding="utf-8")
     except Exception as e:
-        print(f"[aireply] wallet save error: {e}")
+        print(f"[aireply] wallet save err: {e}")
 
 
 WALLETS = load_wallets()
 
 
 def validate_wallet(chain, addr):
-    """Return (ok, reason)."""
     addr = (addr or "").strip()
     if not addr:
         return False, "empty"
     if chain == "sol":
         if not re.fullmatch(r'[1-9A-HJ-NP-Za-km-z]{32,44}', addr):
-            return False, "SOL wallet must be 32-44 base58 chars"
+            return False, "SOL must be 32-44 base58"
     elif chain == "evm":
         if not re.fullmatch(r'0x[a-fA-F0-9]{40}', addr):
-            return False, "EVM wallet must be 0x + 40 hex chars"
+            return False, "EVM must be 0x + 40 hex"
     elif chain == "sui":
         if not re.fullmatch(r'0x[a-fA-F0-9]{64}', addr):
-            return False, "SUI wallet must be 0x + 64 hex chars"
+            return False, "SUI must be 0x + 64 hex"
     else:
         return False, f"unknown chain: {chain}"
     return True, "ok"
@@ -236,16 +220,12 @@ def now_dict():
     return {
         "date": n.strftime("%Y-%m-%d"),
         "time12": n.strftime("%I:%M:%S %p"),
-        "ts": n.timestamp()
+        "ts": n.timestamp(),
     }
 
 
 def is_whitelisted(chat_id):
     return chat_id in DB.get("whitelist", [])
-
-
-def is_quiz_group(chat_id):
-    return chat_id in DB.get("quiz_groups", [])
 
 
 def is_wallet_group(chat_id):
@@ -256,8 +236,8 @@ def is_dm_blacklisted(user_id):
     return user_id in DB.get("dm_blacklist", [])
 
 
-def get_trusted_mods(chat_id):
-    return DB.get("trusted_mods", {}).get(str(chat_id), [])
+def is_aggressive():
+    return bool(DB.get("aggressive", False))
 
 
 KEYWORD_PATTERNS = [re.compile(rf"\b{re.escape(k)}\b", re.IGNORECASE) for k in KEYWORDS]
@@ -272,19 +252,29 @@ def has_trigger(text):
     return False
 
 
+def aggressive_trigger(text):
+    """Aggressive mode: reply to any message with 3+ words."""
+    if not text:
+        return False
+    words = text.strip().split()
+    return len(words) >= AGGRESSIVE_MIN_WORDS
+
+
 def can_reply_to_user(user_id):
-    if MIN_GAP_SAME_USER <= 0:
+    gap = AGGRESSIVE_GAP if is_aggressive() else MIN_GAP_SAME_USER
+    if gap <= 0:
         return True
     last = DB.get("replied_users", {}).get(str(user_id), 0)
-    return (wat_now().timestamp() - last) >= MIN_GAP_SAME_USER
+    return (wat_now().timestamp() - last) >= gap
 
 
 def can_reply_in_group(group_id):
+    limit = AGGRESSIVE_HOURLY if is_aggressive() else RATE_LIMIT_HOURLY
     now = wat_now().timestamp()
     hour_ago = now - 3600
     timestamps = DB.get("hourly", {}).get(str(group_id), [])
     recent = [t for t in timestamps if t > hour_ago]
-    return len(recent) < RATE_LIMIT_HOURLY
+    return len(recent) < limit
 
 
 def can_reply_daily():
@@ -304,8 +294,19 @@ def track_reply(group_id, user_id):
 
 
 def get_delay():
-    lo, hi = SPEED_MODES.get(CURRENT_SPEED, SPEED_MODES["normal"])
+    if is_aggressive():
+        lo, hi = AGGRESSIVE_SPEED
+    else:
+        lo, hi = SPEED_MODES.get(CURRENT_SPEED, SPEED_MODES["normal"])
     return random.randint(lo, hi)
+
+
+def get_slow_mode_extra():
+    """Extra delay if slow mode active."""
+    until = DB.get("slow_mode_until", 0)
+    if until and wat_now().timestamp() < until:
+        return SLOW_MODE_EXTRA_DELAY
+    return 0
 
 
 def build_jump_link(chat_id, msg_id):
@@ -336,17 +337,268 @@ def format_user(sender):
     return "Unknown"
 
 
-def resolve_link_to_chat_id(link):
-    """Return chat_id from a t.me link, or None. Must be async — see plugin."""
-    return None  # resolved async in command handler
+async def _resolve_user_id(target_str):
+    try:
+        target = target_str.strip().lstrip("@")
+        if target.isdigit() or (target.startswith("-") and target[1:].isdigit()):
+            return int(target)
+        try:
+            entity = await CipherElite.get_entity(target)
+            return entity.id
+        except Exception:
+            return None
+    except Exception:
+        return None
+
+
+async def resolve_link_to_chat_id(link):
+    try:
+        link = link.strip()
+        if link.lstrip("-").isdigit():
+            return int(link)
+        m = re.search(r't\.me/c/(\d+)', link)
+        if m:
+            return int(f"-100{m.group(1)}")
+        if link.startswith("https://t.me/"):
+            link = link.replace("https://t.me/", "")
+        elif link.startswith("t.me/"):
+            link = link.replace("t.me/", "")
+        if link.startswith("+"):
+            try:
+                inv = await CipherElite(functions.messages.CheckChatInviteRequest(link))
+                chat = getattr(inv, "chat", None)
+                if chat:
+                    return chat.id
+                return None
+            except Exception as e:
+                dbg(f"invite resolve err: {e}")
+                return None
+        try:
+            entity = await CipherElite.get_entity(link)
+            return entity.id
+        except Exception as e:
+            dbg(f"entity resolve err: {e}")
+            return None
+    except Exception as e:
+        dbg(f"link resolve err: {e}")
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════
+#  GROUP MEMORY — helpers
+# ═══════════════════════════════════════════════════════════════
+
+_mem_buffer = {}  # {chat_id: {"messages": [], "last_flush": ts}}
+
+
+def record_message(chat_id, text, sender_id):
+    """Buffer a message for the 60s batched memory update."""
+    if not text or len(text) < 2:
+        return
+    if text.startswith((".", "..")):
+        return
+    buf = _mem_buffer.setdefault(chat_id, {"messages": [], "last_flush": time.time()})
+    buf["messages"].append({
+        "text": text[:300],
+        "sender_id": sender_id,
+        "ts": time.time(),
+    })
+    # cap buffer
+    if len(buf["messages"]) > 500:
+        buf["messages"] = buf["messages"][-500:]
+
+
+def _extract_phrases(messages):
+    """Top phrases from a batch of messages."""
+    counter = {}
+    stop = {"the", "a", "an", "and", "or", "to", "of", "in", "on", "at",
+            "is", "am", "are", "was", "were", "be", "been", "being",
+            "it", "its", "this", "that", "these", "those", "so", "for",
+            "with", "from", "by", "as", "if", "then", "than", "but"}
+    for m in messages:
+        t = (m.get("text") or "").lower()
+        # words
+        for w in re.findall(r"[a-z0-9$]{3,}", t):
+            if w in stop:
+                continue
+            counter[w] = counter.get(w, 0) + 1
+    top = sorted(counter.items(), key=lambda kv: -kv[1])[:LEARN_MAX_PHRASES]
+    return [w for w, _ in top]
+
+
+def _extract_topics(messages):
+    """Recurring $TOKEN or project mentions."""
+    counter = {}
+    for m in messages:
+        t = m.get("text") or ""
+        for tok in re.findall(r"\$[A-Za-z0-9_]{2,20}", t):
+            counter[tok.upper()] = counter.get(tok.upper(), 0) + 1
+    top = sorted(counter.items(), key=lambda kv: -kv[1])[:LEARN_MAX_TOPICS]
+    return [w for w, _ in top]
+
+
+def _infer_tone(messages):
+    """Infer dominant tone from a batch."""
+    pidgin_markers = ["omo", "na", "dey", "sha", "abi", "chale", "wahala",
+                      "shey", "sabi", "jare", "sef", "gan"]
+    formal_markers = ["please", "kindly", "regards", "sincerely", "apolog",
+                      "however", "furthermore", "moreover"]
+    casual_markers = ["lol", "lmao", "fr", "ngl", "tbh", "imo", "bro", "fam"]
+
+    pidgin_score = 0
+    formal_score = 0
+    casual_score = 0
+    total = 0
+    for m in messages:
+        t = (m.get("text") or "").lower()
+        if not t:
+            continue
+        total += 1
+        for k in pidgin_markers:
+            if k in t:
+                pidgin_score += 1
+        for k in formal_markers:
+            if k in t:
+                formal_score += 1
+        for k in casual_markers:
+            if k in t:
+                casual_score += 1
+    if total == 0:
+        return "casual"
+    if pidgin_score > total * 0.15:
+        return "pidgin"
+    if formal_score > total * 0.1:
+        return "formal"
+    if casual_score > total * 0.2:
+        return "casual"
+    return "casual"
+
+
+def flush_memory(chat_id):
+    """Called every 60s — processes buffer into group memory."""
+    buf = _mem_buffer.get(chat_id)
+    if not buf or not buf["messages"]:
+        return
+    messages = buf["messages"]
+
+    gm = DB.get("group_memory", {})
+    existing = gm.get(str(chat_id), {})
+
+    # merge phrases
+    new_phrases = _extract_phrases(messages)
+    old_phrases = existing.get("top_phrases", [])
+    merged = old_phrases + new_phrases
+    # count + sort
+    cnt = {}
+    for p in merged:
+        cnt[p] = cnt.get(p, 0) + 1
+    top_phrases = [k for k, _ in sorted(cnt.items(), key=lambda kv: -kv[1])[:LEARN_MAX_PHRASES]]
+
+    # merge topics
+    new_topics = _extract_topics(messages)
+    old_topics = existing.get("topics", [])
+    tcnt = {}
+    for t in old_topics + new_topics:
+        tcnt[t] = tcnt.get(t, 0) + 1
+    top_topics = [k for k, _ in sorted(tcnt.items(), key=lambda kv: -kv[1])[:LEARN_MAX_TOPICS]]
+
+    # tone
+    tone = _infer_tone(messages)
+
+    # activity rate (msgs/min)
+    now_ts = time.time()
+    recent = [m for m in messages if now_ts - m.get("ts", 0) < ACTIVITY_WINDOW]
+    activity_rate = len(recent) / (ACTIVITY_WINDOW / 60)
+
+    # mode
+    if activity_rate > 5:
+        mode = "hyped"
+    elif activity_rate < 0.2:
+        mode = "dead"
+    else:
+        mode = "normal"
+
+    # check average message length for "serious"
+    avg_len = sum(len(m.get("text", "")) for m in messages) / max(len(messages), 1)
+    if avg_len > 80 and activity_rate < 3:
+        mode = "serious"
+
+    gm[str(chat_id)] = {
+        "top_phrases": top_phrases,
+        "topics": top_topics,
+        "tone": tone,
+        "mode": mode,
+        "activity_rate": round(activity_rate, 2),
+        "msg_count": existing.get("msg_count", 0) + len(messages),
+        "last_updated": now_ts,
+    }
+    DB["group_memory"] = gm
+    save_db(DB)
+    dbg(f"memory flush {chat_id}: tone={tone} mode={mode} phrases={len(top_phrases)}")
+
+    # clear buffer
+    buf["messages"] = []
+    buf["last_flush"] = now_ts
+
+
+def get_group_context(chat_id):
+    """Return a short context string for the prompt."""
+    gm = DB.get("group_memory", {}).get(str(chat_id))
+    if not gm:
+        return ""
+    parts = []
+    if gm.get("tone"):
+        parts.append(f"tone={gm['tone']}")
+    if gm.get("mode"):
+        parts.append(f"room={gm['mode']}")
+    if gm.get("top_phrases"):
+        parts.append(f"common words: {', '.join(gm['top_phrases'][:10])}")
+    if gm.get("topics"):
+        parts.append(f"hot topics: {', '.join(gm['topics'][:5])}")
+    return " | ".join(parts)
+
+
+def get_persona_block():
+    pp = DB.get("persona_phrases", [])
+    if not pp:
+        return ""
+    return f"Phrases you actually use: {', '.join(pp[-15:])}"
+
+
+print("[aireply] MODULE LOADED — chunk 1")
 
 # ═══ END OF BATCH 1 ═══
-
 # ═══════════════════════════════════════════════════════════════
-#  GEMINI — keyword replies + quiz answer style
+#  GEMINI — keyword replies with group memory + persona
 # ═══════════════════════════════════════════════════════════════
 
-async def generate_reply(their_message, context_messages=None):
+def _build_room_instruction(chat_id):
+    """Returns tone/room hints based on group memory."""
+    gm = DB.get("group_memory", {}).get(str(chat_id))
+    if not gm:
+        return ""
+    tone = gm.get("tone", "casual")
+    mode = gm.get("mode", "normal")
+
+    hints = []
+    if tone == "pidgin":
+        hints.append("- This group uses Nigerian Pidgin a lot — you can reply in pidgin")
+    elif tone == "formal":
+        hints.append("- This group is more formal — keep replies clean English, no slang")
+    else:
+        hints.append("- This group is casual — slang is fine")
+
+    if mode == "hyped":
+        hints.append("- Room is HYPED right now — match the energy, be quick")
+    elif mode == "dead":
+        hints.append("- Room is quiet right now — be more engaging, don't sound flat")
+    elif mode == "serious":
+        hints.append("- Room is serious right now — no jokes, no slang")
+
+    return "\n".join(hints)
+
+
+async def generate_reply(their_message, context_messages=None, chat_id=None):
     if not ai_config.is_enabled():
         dbg("gemini skip: ai_config disabled")
         return None
@@ -361,6 +613,16 @@ async def generate_reply(their_message, context_messages=None):
 
     banned = ", ".join(RECENT_REPLIES[-5:]) if RECENT_REPLIES else "(none yet)"
 
+    # room reading + persona
+    room_hint = _build_room_instruction(chat_id) if chat_id else ""
+    persona = get_persona_block()
+
+    extra = ""
+    if room_hint:
+        extra += f"\n\nContext from this group:\n{room_hint}"
+    if persona:
+        extra += f"\n\n{persona}"
+
     user_prompt = f"""Recent context:
 {context if context else "(no context)"}
 
@@ -368,7 +630,7 @@ Recent replies you already sent (DO NOT repeat these):
 {banned}
 
 Message to reply to:
-\"{their_message[:200]}\"
+\"{their_message[:200]}\"{extra}
 
 Your reply:"""
 
@@ -400,7 +662,7 @@ Your reply:"""
             try:
                 retry_prompt = user_prompt + (
                     f"\n\nIMPORTANT: You already said '{text}'. "
-                    f"Do NOT repeat it. Say something completely different, max {WORD_LIMIT} words."
+                    f"Do NOT repeat it. Say something different, max {WORD_LIMIT} words."
                 )
                 r2 = await client.aio.models.generate_content(
                     model=GEMINI_MODEL,
@@ -429,227 +691,37 @@ Your reply:"""
         dbg(f"gemini ok: '{text}'")
         return text
     except Exception as e:
-        print(f"[aireply] Gemini error: {e}")
-        return None
-
-
-async def generate_quiz_answer(question, learned_examples, learned_style):
-    """Generate a quiz answer mimicking learned style."""
-    if not ai_config.is_enabled():
-        return None
-    api_key = ai_config.get_api_key()
-    if not api_key:
-        return None
-
-    examples_text = ""
-    if learned_examples:
-        examples_text = "Correct answers I've seen in this group:\n" + "\n".join(
-            [f"- {e}" for e in learned_examples[-8:]]
-        )
-
-    style_hint = learned_style or "(short, lowercase, no punctuation)"
-
-    prompt = f"""You are answering a quiz question in a Telegram group.
-
-{examples_text}
-
-Style to mimic: {style_hint}
-
-QUESTION:
-\"{question[:300]}\"
-
-Answer in 1-3 words, matching the group's answer style. Just the answer, nothing else."""
-
-    try:
-        client = genai.Client(api_key=api_key)
-        config = types.GenerateContentConfig(
-            max_output_tokens=30,
-            temperature=0.9,
-        )
-        resp = await client.aio.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
-            config=config,
-        )
-        text = (resp.text or "").strip().replace("\n", " ").strip('"').strip("'")
-        if len(text) < 1 or len(text) > 60:
-            return None
-        dbg(f"quiz answer generated: '{text}'")
-        return text
-    except Exception as e:
-        print(f"[aireply] quiz gemini error: {e}")
+        print(f"[aireply] Gemini err: {e}")
         return None
 
 
 # ═══════════════════════════════════════════════════════════════
-#  QUEUE BOT CLIENT
+#  PERSONA BUILDER — extract phrases from good replies
 # ═══════════════════════════════════════════════════════════════
 
-QUEUE_BOT = None
-BOT_SUPERVISOR_TASK = None
-BOT_RUNNING = False
-
-
-async def _queue_bot_start():
-    global QUEUE_BOT, BOT_RUNNING
-    if BOT_RUNNING and QUEUE_BOT and QUEUE_BOT.is_connected():
+def persona_add(reply_text):
+    """Add words from a good reply to the persona list."""
+    if not reply_text:
         return
-    if not QUEUE_BOT_TOKEN:
-        dbg("queue bot: no token")
+    t = reply_text.lower().strip()
+    if len(t) < 2 or len(t) > 60:
         return
-    try:
-        bot = TelegramClient(str(BOT_SESSION_FILE), 6, "eb06d4abfb49dc3eeb1aeb98ae0f581e")
-        await bot.start(bot_token=QUEUE_BOT_TOKEN)
+    pp = DB.get("persona_phrases", [])
+    # add whole phrase if it's short, else skip
+    if t not in pp and len(t) <= 30:
+        pp.append(t)
+        DB["persona_phrases"] = pp[-50:]  # keep 50
+        save_db(DB)
+        dbg(f"persona added: '{t}'")
 
-        @bot.on(events.CallbackQuery)
-        async def _on_callback(event):
-            try:
-                data = event.data.decode() if isinstance(event.data, bytes) else str(event.data)
-                await _handle_button(event, data)
-            except Exception as e:
-                print(f"[aireply] callback error: {e}")
-                try:
-                    await event.answer("Error", alert=False)
-                except Exception:
-                    pass
-
-        QUEUE_BOT = bot
-        BOT_RUNNING = True
-        me = await bot.get_me()
-        dbg(f"queue bot: connected ✅ @{me.username}")
-    except Exception as e:
-        BOT_RUNNING = False
-        print(f"[aireply] queue bot start error: {e}")
-
-
-async def _queue_bot_supervisor():
-    global BOT_RUNNING
-    await asyncio.sleep(30)
-    while True:
-        try:
-            if QUEUE_BOT_TOKEN:
-                alive = QUEUE_BOT and QUEUE_BOT.is_connected()
-                if not alive:
-                    dbg("supervisor: restarting")
-                    BOT_RUNNING = False
-                    await _queue_bot_start()
-        except Exception as e:
-            print(f"[aireply] supervisor error: {e}")
-        await asyncio.sleep(60)
-
-
-async def _handle_button(event, data):
-    try:
-        parts = data.split(":")
-        action = parts[0]
-        target_id = parts[1] if len(parts) > 1 else None
-
-        if action == "ack":
-            await event.answer("✅ Acked")
-            try:
-                await event.edit(event.message.text + "\n\n✅ ACKED")
-            except Exception:
-                pass
-            return
-
-        if action == "block_dm":
-            try:
-                uid = int(target_id)
-                bl = DB.get("dm_blacklist", [])
-                if uid not in bl:
-                    bl.append(uid)
-                    DB["dm_blacklist"] = bl
-                    save_db(DB)
-                await event.answer(f"🚫 Blocked {uid}")
-            except Exception as e:
-                await event.answer(f"Error: {e}")
-            return
-
-        if action == "unblock_dm":
-            try:
-                uid = int(target_id)
-                bl = DB.get("dm_blacklist", [])
-                if uid in bl:
-                    bl.remove(uid)
-                    DB["dm_blacklist"] = bl
-                    save_db(DB)
-                await event.answer(f"🔓 Unblocked {uid}")
-            except Exception as e:
-                await event.answer(f"Error: {e}")
-            return
-
-        if action == "allow_dm":
-            try:
-                uid = int(target_id)
-                wl = DB.get("dm_whitelist", [])
-                if uid not in wl:
-                    wl.append(uid)
-                    DB["dm_whitelist"] = wl
-                    save_db(DB)
-                await event.answer(f"✅ Allowed {uid}")
-            except Exception as e:
-                await event.answer(f"Error: {e}")
-            return
-
-        if action == "clear":
-            try:
-                await event.delete()
-                await event.answer("🗑️ Cleared", alert=False)
-            except Exception:
-                await event.answer("Cleared")
-            return
-
-        if action in ("good", "bad", "correct"):
-            try:
-                n = int(target_id)
-                replies = DB.get("replies", [])
-                for r in replies:
-                    if r.get("n") == n:
-                        r["feedback"] = action
-                        break
-                save_db(DB)
-                await event.answer(f"✅ Logged as {action}")
-            except Exception as e:
-                await event.answer(f"Error: {e}")
-            return
-
-        # quiz button click
-        if action == "quizclick":
-            # data: quizclick:chat_id:msg_id:row:col
-            try:
-                chat_id = int(parts[1])
-                msg_id = int(parts[2])
-                row = int(parts[3])
-                col = int(parts[4])
-                try:
-                    msg = await CipherElite.get_messages(chat_id, ids=msg_id)
-                    if msg and msg.buttons:
-                        await msg.click(row, col)
-                        await event.answer("✅ Clicked")
-                    else:
-                        await event.answer("⚠️ No buttons on msg")
-                except Exception as e:
-                    await event.answer(f"❌ {e}")
-            except Exception as e:
-                await event.answer(f"Error: {e}")
-            return
-
-        await event.answer("Unknown action")
-    except Exception as e:
-        print(f"[aireply] button handler error: {e}")
-        try:
-            await event.answer("Error")
-        except Exception:
-            pass
-
-# ═══ END OF BATCH 2 ═══
 
 # ═══════════════════════════════════════════════════════════════
-#  SENDERS — log card + queue
+#  SENDERS
 # ═══════════════════════════════════════════════════════════════
 
 def build_reply_card(n, group_name, user_name, their_msg, bot_reply,
                      speed="normal", jump_link=None):
+    mode_tag = " 🔥 AGGRO" if is_aggressive() else ""
     header = (
         "╔══════════════════════════════════════╗\n"
         "║  🎯⚡💥🔥  KCE AI REPLY  🎯⚡💥🔥\n"
@@ -657,6 +729,7 @@ def build_reply_card(n, group_name, user_name, their_msg, bot_reply,
         f"║  📍 {group_name[:30]}\n"
         f"║  👤 {user_name[:40]}\n"
         f"║  🕐 {wat_now().strftime('%I:%M:%S %p')} — {wat_now().strftime('%d/%m/%Y')} WAT\n"
+        f"║  🎚️ {speed}{mode_tag}\n"
         "╚══════════════════════════════════════╝"
     )
     body = (
@@ -666,126 +739,47 @@ def build_reply_card(n, group_name, user_name, their_msg, bot_reply,
         f"🔗 Auto-generated reply  •  #{n}\n"
     )
     if jump_link:
-        body += f"🔗 Jump to message: {jump_link}\n"
-    body += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        body += f"🔗 Jump: {jump_link}\n"
+    body += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    body += "💡 Reply to this card with `good` or `bad` to teach KCE"
     return header + body
 
 
-def build_quiz_card(n, group_name, question, answer, correct, jump_link=None):
-    emoji = "✅" if correct else "❌"
+def build_wallet_card(n, group_name, user_name, dropped, chain, addr, jump_link=None):
     header = (
         "╔══════════════════════════════════════╗\n"
-        "║  🎯⚡💥🔥  KCE QUIZ REPLY  🎯⚡💥🔥\n"
+        "║  💰⚡💥🔥  KCE WALLET DROP  🔥💥⚡💰\n"
         "║  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"║  📍 {group_name[:30]}\n"
+        f"║  👤 {user_name[:40]}\n"
         f"║  🕐 {wat_now().strftime('%I:%M:%S %p')} — {wat_now().strftime('%d/%m/%Y')} WAT\n"
         "╚══════════════════════════════════════╝"
     )
     body = (
-        f'\n❓ QUIZ\n"{question[:150]}"\n'
-        f'\n🤖 KCE ANSWERED\n"{answer}"\n'
-        f"\n{emoji} {'CORRECT' if correct else 'DELIBERATE WRONG'}\n"
-        f"🔗 Quiz reply  •  #{n}\n"
+        f'\n💬 THEY DROPPED\n"{dropped[:150]}"\n'
+        f'\n💰 KCE REPLIED ({chain.upper()})\n"{addr}"\n'
+        f"\n⚡ BEAST MODE\n🔗 #{n}\n"
     )
     if jump_link:
-        body += f"🔗 Jump to message: {jump_link}\n"
+        body += f"🔗 Jump: {jump_link}\n"
     body += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     return header + body
 
 
-async def send_log(text, buttons=None):
-    """Log cards sent via queue bot so feedback buttons work."""
+async def send_log(text):
     try:
-        if QUEUE_BOT and QUEUE_BOT.is_connected():
-            try:
-                return await QUEUE_BOT.send_message(AI_LOG_CHAT_ID, text, buttons=buttons)
-            except Exception as e:
-                dbg(f"log via bot failed, fallback to userbot: {e}")
-        if buttons:
-            text += "\n\n_(buttons unavailable — bot offline)_"
         return await CipherElite.send_message(AI_LOG_CHAT_ID, text)
     except Exception as e:
-        print(f"[aireply] log error: {e}")
+        print(f"[aireply] log err: {e}")
         return None
 
 
-async def queue_item(text, alert=False, buttons=None):
+async def queue_item(text, alert=False):
     try:
         prefix = "🚨 " if alert else "📥 "
-        full_text = prefix + text
-        if QUEUE_BOT and QUEUE_BOT.is_connected():
-            try:
-                return await QUEUE_BOT.send_message(QUEUE_CHAT_ID, full_text, buttons=buttons)
-            except Exception as e:
-                dbg(f"queue via bot failed: {e}")
-        if buttons:
-            full_text += "\n\n_(buttons unavailable)_"
-        await CipherElite.send_message(QUEUE_CHAT_ID, full_text)
+        await CipherElite.send_message(QUEUE_CHAT_ID, prefix + text)
     except Exception as e:
-        print(f"[aireply] queue error: {e}")
-
-
-def make_dm_buttons(sender_id):
-    return [[
-        Button.inline("✅ Allow", f"allow_dm:{sender_id}".encode()),
-        Button.inline("🚫 Block", f"block_dm:{sender_id}".encode()),
-    ]]
-
-
-def make_suspicious_buttons(sender_id):
-    return [[
-        Button.inline("✅ Ack", b"ack"),
-        Button.inline("🚫 Block user", f"block_dm:{sender_id}".encode()),
-    ]]
-
-
-def make_error_buttons():
-    return [[Button.inline("✅ Ack", b"ack"), Button.inline("🗑️ Clear", b"clear")]]
-
-
-def make_cap_buttons():
-    return [[Button.inline("✅ Ack", b"ack")]]
-
-
-def make_feedback_buttons(reply_num):
-    return [[
-        Button.inline("👍 Good", f"good:{reply_num}".encode()),
-        Button.inline("👎 Bad", f"bad:{reply_num}".encode()),
-        Button.inline("✏️ Correct", f"correct:{reply_num}".encode()),
-    ]]
-
-
-# ═══════════════════════════════════════════════════════════════
-#  INIT
-# ═══════════════════════════════════════════════════════════════
-
-def init(client_instance):
-    commands = [
-        ".kce - status",
-        ".kce stats - reply stats",
-        ".kce memory - memory info",
-        ".kce replies [n] - last N replies",
-        ".kce reset - clear memory",
-        ".kce help - all commands",
-        ".kce speed fast|normal|slow",
-        ".kce online - heartbeat",
-        ".kce tz - timezone",
-        ".kce setbot <token> - save queue bot token",
-        ".kce bot status / restart / diag",
-        ".kce dm block/unblock/list",
-        ".kcew - whitelist current group",
-        ".kcew off - remove whitelist",
-        ".kcew list - list whitelisted",
-        ".kce quiz on/off <link>",
-        ".kce wallet on/off <link>",
-        ".kce wallet set sol|evm|sui <addr>",
-        ".kce wallet list",
-        ".kce reply on/off <link>",
-        ".kce mods add/remove/list [<link>]",
-        ".kce flags list",
-    ]
-    description = "🤖 KCE AI Reply v3.0 — replies + quiz + wallet + buttons"
-    add_handler("aireply", commands, description)
+        print(f"[aireply] queue err: {e}")
 
 
 async def _safe_reply(event, text):
@@ -795,7 +789,7 @@ async def _safe_reply(event, text):
         else:
             await send_log(text)
     except Exception as e:
-        print(f"[aireply] safe_reply error: {e}")
+        print(f"[aireply] safe_reply err: {e}")
 
 
 async def _is_owner(event):
@@ -806,307 +800,12 @@ async def _is_owner(event):
         return False
 
 
-async def resolve_link_to_chat_id(link):
-    """Resolve t.me link to chat_id via CipherElite."""
-    try:
-        link = link.strip()
-        if link.startswith("https://t.me/"):
-            link = link.replace("https://t.me/", "")
-        elif link.startswith("t.me/"):
-            link = link.replace("t.me/", "")
-        # strip invite prefix
-        if link.startswith("+"):
-            try:
-                inv = await CipherElite(functions.messages.CheckChatInviteRequest(link))
-                return getattr(inv.chat, "id", None)
-            except Exception as e:
-                dbg(f"invite resolve error: {e}")
-                return None
-        # public username
-        try:
-            entity = await CipherElite.get_entity(link)
-            return entity.id
-        except Exception as e:
-            dbg(f"entity resolve error: {e}")
-            return None
-    except Exception as e:
-        dbg(f"link resolve error: {e}")
-        return None
-
-
-# ═══════════════════════════════════════════════════════════════
-#  BOT LIFECYCLE COMMANDS
-# ═══════════════════════════════════════════════════════════════
-
-@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+setbot\s+(\S+)$"))
-@rishabh()
-async def cmd_setbot(event):
-    if not await _is_owner(event):
-        return
-    try:
-        token = event.pattern_match.group(1).strip()
-        if ":" not in token or len(token) < 40:
-            return await _safe_reply(event, f"❌ Invalid token (len={len(token)})")
-        try: await event.delete()
-        except: pass
-        QUEUE_BOT_CONFIG_FILE.write_text(
-            json.dumps({"token": token, "saved_at": wat_now().strftime("%Y-%m-%d %H:%M:%S")}, indent=2),
-            encoding="utf-8"
-        )
-        await _safe_reply(event, f"✅ Token saved ({len(token)} chars). Run `.kce bot restart`.")
-    except Exception as e:
-        await send_log(f"❌ setbot error: `{e}`")
-
-
-@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+bot\s+status$"))
-@rishabh()
-async def cmd_bot_status(event):
-    if not await _is_owner(event):
-        return
-    try:
-        if not QUEUE_BOT_TOKEN:
-            return await _safe_reply(event, "❌ No token. Run `.kce setbot <token>`.")
-        if QUEUE_BOT and QUEUE_BOT.is_connected():
-            me = await QUEUE_BOT.get_me()
-            return await _safe_reply(event, f"✅ **Queue bot online**\n👤 @{me.username}\n🆔 `{me.id}`")
-        await _safe_reply(event, "⚠️ Not connected — try `.kce bot restart`")
-    except Exception as e:
-        await send_log(f"❌ bot status error: `{e}`")
-
-
-@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+bot\s+restart$"))
-@rishabh()
-async def cmd_bot_restart(event):
-    if not await _is_owner(event):
-        return
-    try:
-        global QUEUE_BOT, BOT_RUNNING, QUEUE_BOT_TOKEN
-        try:
-            if QUEUE_BOT and QUEUE_BOT.is_connected():
-                await QUEUE_BOT.disconnect()
-        except Exception:
-            pass
-        QUEUE_BOT = None
-        BOT_RUNNING = False
-        QUEUE_BOT_TOKEN = _load_bot_token()
-        if not QUEUE_BOT_TOKEN:
-            return await _safe_reply(event, "❌ No token. `.kce setbot <token>`")
-        await _safe_reply(event, f"🔄 Restarting (len={len(QUEUE_BOT_TOKEN)})...")
-        await _queue_bot_start()
-        await asyncio.sleep(2)
-        status = "✅ online" if (QUEUE_BOT and QUEUE_BOT.is_connected()) else "❌ offline"
-        await _safe_reply(event, f"Queue bot: {status}")
-    except Exception as e:
-        await send_log(f"❌ bot restart error: `{e}`")
-
-
-@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+diag$"))
-@rishabh()
-async def cmd_diag(event):
-    if not await _is_owner(event):
-        return
-    try:
-        lines = ["🔍 **KCE Diagnostics**", "━━━━━━━━━━━━━━━━━━━━"]
-        lines.append(f"{'✅' if QUEUE_BOT_TOKEN else '❌'} Token: {'set' if QUEUE_BOT_TOKEN else 'empty'}")
-        lines.append(f"{'✅' if QUEUE_BOT_CONFIG_FILE.exists() else '❌'} Config file")
-        if QUEUE_BOT:
-            conn = QUEUE_BOT.is_connected()
-            lines.append(f"🤖 Client: {'🟢 connected' if conn else '🔴 disconnected'}")
-        else:
-            lines.append("🤖 Client: **None**")
-        lines.append(f"⚙️ BOT_RUNNING: `{BOT_RUNNING}`")
-        lines.append(f"📝 Whitelisted: `{len(DB.get('whitelist', []))}`")
-        lines.append(f"❓ Quiz groups: `{len(DB.get('quiz_groups', []))}`")
-        lines.append(f"💰 Wallet groups: `{len(DB.get('wallet_groups', []))}`")
-        await _safe_reply(event, "\n".join(lines))
-    except Exception as e:
-        await _safe_reply(event, f"❌ Diag error: `{e}`")
-
-
-# ═══════════════════════════════════════════════════════════════
-#  GROUP FLAG COMMANDS (.kce quiz/wallet/reply on|off <link>)
-# ═══════════════════════════════════════════════════════════════
-
-@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+quiz\s+(on|off)\s+(\S+)$"))
-@rishabh()
-async def cmd_quiz_flag(event):
-    if not await _is_owner(event):
-        return
-    try:
-        action = event.pattern_match.group(1).lower()
-        link = event.pattern_match.group(2)
-        cid = await resolve_link_to_chat_id(link)
-        if cid is None:
-            return await _safe_reply(event, f"❌ Could not resolve `{link}`")
-        groups = DB.get("quiz_groups", [])
-        if action == "on":
-            if cid in groups:
-                return await _safe_reply(event, f"ℹ️ Quiz already ON for `{cid}`")
-            groups.append(cid)
-            DB["quiz_groups"] = groups
-            save_db(DB)
-            await _safe_reply(event, f"✅ Quiz mode **ON** for `{cid}`")
-        else:
-            if cid not in groups:
-                return await _safe_reply(event, f"ℹ️ Quiz already OFF for `{cid}`")
-            groups.remove(cid)
-            DB["quiz_groups"] = groups
-            save_db(DB)
-            await _safe_reply(event, f"⏹️ Quiz mode **OFF** for `{cid}`")
-    except Exception as e:
-        await send_log(f"❌ quiz flag error: `{e}`")
-
-
-@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+wallet\s+(on|off)\s+(\S+)$"))
-@rishabh()
-async def cmd_wallet_flag(event):
-    if not await _is_owner(event):
-        return
-    try:
-        action = event.pattern_match.group(1).lower()
-        link = event.pattern_match.group(2)
-        cid = await resolve_link_to_chat_id(link)
-        if cid is None:
-            return await _safe_reply(event, f"❌ Could not resolve `{link}`")
-        groups = DB.get("wallet_groups", [])
-        if action == "on":
-            if cid in groups:
-                return await _safe_reply(event, f"ℹ️ Wallet already ON for `{cid}`")
-            groups.append(cid)
-            DB["wallet_groups"] = groups
-            save_db(DB)
-            await _safe_reply(event, f"✅ Wallet drop **ON** for `{cid}`")
-        else:
-            if cid not in groups:
-                return await _safe_reply(event, f"ℹ️ Wallet already OFF for `{cid}`")
-            groups.remove(cid)
-            DB["wallet_groups"] = groups
-            save_db(DB)
-            await _safe_reply(event, f"⏹️ Wallet drop **OFF** for `{cid}`")
-    except Exception as e:
-        await send_log(f"❌ wallet flag error: `{e}`")
-
-
-@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+reply\s+(on|off)\s+(\S+)$"))
-@rishabh()
-async def cmd_reply_flag(event):
-    if not await _is_owner(event):
-# ═══════════════════════════════════════════════════════════════
-#  SENDERS — log card + queue
-# ═══════════════════════════════════════════════════════════════
-
-def build_reply_card(n, group_name, user_name, their_msg, bot_reply,
-                     speed="normal", jump_link=None):
-    header = (
-        "╔══════════════════════════════════════╗\n"
-        "║  🎯⚡💥🔥  KCE AI REPLY  🎯⚡💥🔥\n"
-        "║  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"║  📍 {group_name[:30]}\n"
-        f"║  👤 {user_name[:40]}\n"
-        f"║  🕐 {wat_now().strftime('%I:%M:%S %p')} — {wat_now().strftime('%d/%m/%Y')} WAT\n"
-        "╚══════════════════════════════════════╝"
-    )
-    body = (
-        f'\n📩 THEY SAID\n"{their_msg[:150]}"\n'
-        f'\n🤖 KCE REPLIED\n"{bot_reply}"\n'
-        f"\n✅ SENT  •  ⚡ {speed}\n"
-        f"🔗 Auto-generated reply  •  #{n}\n"
-    )
-    if jump_link:
-        body += f"🔗 Jump to message: {jump_link}\n"
-    body += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    return header + body
-
-
-def build_quiz_card(n, group_name, question, answer, correct, jump_link=None):
-    emoji = "✅" if correct else "❌"
-    header = (
-        "╔══════════════════════════════════════╗\n"
-        "║  🎯⚡💥🔥  KCE QUIZ REPLY  🎯⚡💥🔥\n"
-        "║  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"║  📍 {group_name[:30]}\n"
-        f"║  🕐 {wat_now().strftime('%I:%M:%S %p')} — {wat_now().strftime('%d/%m/%Y')} WAT\n"
-        "╚══════════════════════════════════════╝"
-    )
-    body = (
-        f'\n❓ QUIZ\n"{question[:150]}"\n'
-        f'\n🤖 KCE ANSWERED\n"{answer}"\n'
-        f"\n{emoji} {'CORRECT' if correct else 'DELIBERATE WRONG'}\n"
-        f"🔗 Quiz reply  •  #{n}\n"
-    )
-    if jump_link:
-        body += f"🔗 Jump to message: {jump_link}\n"
-    body += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    return header + body
-
-
-async def send_log(text, buttons=None):
-    """Log cards sent via queue bot so feedback buttons work."""
-    try:
-        if QUEUE_BOT and QUEUE_BOT.is_connected():
-            try:
-                return await QUEUE_BOT.send_message(AI_LOG_CHAT_ID, text, buttons=buttons)
-            except Exception as e:
-                dbg(f"log via bot failed, fallback: {e}")
-        if buttons:
-            text += "\n\n_(buttons unavailable — bot offline)_"
-        return await CipherElite.send_message(AI_LOG_CHAT_ID, text)
-    except Exception as e:
-        print(f"[aireply] log error: {e}")
-        return None
-
-
-async def queue_item(text, alert=False, buttons=None):
-    try:
-        prefix = "🚨 " if alert else "📥 "
-        full_text = prefix + text
-        if QUEUE_BOT and QUEUE_BOT.is_connected():
-            try:
-                return await QUEUE_BOT.send_message(QUEUE_CHAT_ID, full_text, buttons=buttons)
-            except Exception as e:
-                dbg(f"queue via bot failed: {e}")
-        if buttons:
-            full_text += "\n\n_(buttons unavailable)_"
-        await CipherElite.send_message(QUEUE_CHAT_ID, full_text)
-    except Exception as e:
-        print(f"[aireply] queue error: {e}")
-
-
-def make_dm_buttons(sender_id):
-    return [[
-        Button.inline("✅ Allow", f"allow_dm:{sender_id}".encode()),
-        Button.inline("🚫 Block", f"block_dm:{sender_id}".encode()),
-    ]]
-
-
-def make_suspicious_buttons(sender_id):
-    return [[
-        Button.inline("✅ Ack", b"ack"),
-        Button.inline("🚫 Block user", f"block_dm:{sender_id}".encode()),
-    ]]
-
-
-def make_error_buttons():
-    return [[Button.inline("✅ Ack", b"ack"), Button.inline("🗑️ Clear", b"clear")]]
-
-
-def make_cap_buttons():
-    return [[Button.inline("✅ Ack", b"ack")]]
-
-
-def make_feedback_buttons(reply_num):
-    return [[
-        Button.inline("👍 Good", f"good:{reply_num}".encode()),
-        Button.inline("👎 Bad", f"bad:{reply_num}".encode()),
-        Button.inline("✏️ Correct", f"correct:{reply_num}".encode()),
-    ]]
-
-
 # ═══════════════════════════════════════════════════════════════
 #  INIT
 # ═══════════════════════════════════════════════════════════════
 
 def init(client_instance):
+    print("[aireply] init called")
     commands = [
         ".kce - status",
         ".kce stats - reply stats",
@@ -1115,314 +814,23 @@ def init(client_instance):
         ".kce reset - clear memory",
         ".kce help - all commands",
         ".kce speed fast|normal|slow",
-        ".kce online - heartbeat",
         ".kce tz - timezone",
-        ".kce setbot <token> - save queue bot token",
-        ".kce bot status / restart / diag",
+        ".kce aggressive on/off",
+        ".kce room - current room read",
+        ".kce persona list",
+        ".kce summary - trigger daily summary",
         ".kce dm block/unblock/list",
+        ".kce wallet set sol|evm|sui <addr>",
+        ".kce wallet list",
+        ".kce wallet on|off <link|id>",
         ".kcew - whitelist current group",
         ".kcew off - remove whitelist",
         ".kcew list - list whitelisted",
-        ".kce quiz on/off <link|id>",
-        ".kce wallet on/off <link|id>",
-        ".kce wallet set sol|evm|sui <addr>",
-        ".kce wallet list",
-        ".kce reply on/off <link|id>",
-        ".kce mods add/remove/list [<link|id>]",
-        ".kce flags list",
     ]
-    description = "🤖 KCE AI Reply v3.0 — replies + quiz + wallet + buttons"
+    description = "🤖 KCE AI Reply v3.2 — learning + aggressive + persona"
     add_handler("aireply", commands, description)
+    print("[aireply] commands registered")
 
-
-async def _safe_reply(event, text):
-    try:
-        if event.is_private:
-            await event.reply(text)
-        else:
-            await send_log(text)
-    except Exception as e:
-        print(f"[aireply] safe_reply error: {e}")
-
-
-async def _is_owner(event):
-    try:
-        me = await CipherElite.get_me()
-        return event.sender_id == me.id
-    except Exception:
-        return False
-
-
-async def resolve_link_to_chat_id(link):
-    """Resolve t.me link OR numeric ID to chat_id."""
-    try:
-        link = link.strip()
-
-        # numeric ID
-        if link.lstrip("-").isdigit():
-            return int(link)
-
-        # t.me/c/XXX/msg — internal link
-        m = re.search(r't\.me/c/(\d+)', link)
-        if m:
-            return int(f"-100{m.group(1)}")
-
-        # strip t.me prefix
-        if link.startswith("https://t.me/"):
-            link = link.replace("https://t.me/", "")
-        elif link.startswith("t.me/"):
-            link = link.replace("t.me/", "")
-
-        # invite link
-        if link.startswith("+"):
-            try:
-                inv = await CipherElite(functions.messages.CheckChatInviteRequest(link))
-                chat = getattr(inv, "chat", None)
-                if chat:
-                    return chat.id
-                # already participant — try to get chat via invite hash won't help; return None
-                dbg("invite resolve: no chat field (already member?)")
-                return None
-            except Exception as e:
-                dbg(f"invite resolve error: {e}")
-                return None
-
-        # public username
-        try:
-            entity = await CipherElite.get_entity(link)
-            return entity.id
-        except Exception as e:
-            dbg(f"entity resolve error: {e}")
-            return None
-    except Exception as e:
-        dbg(f"link resolve error: {e}")
-        return None
-
-
-# ═══════════════════════════════════════════════════════════════
-#  BOT LIFECYCLE COMMANDS
-# ═══════════════════════════════════════════════════════════════
-
-@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+setbot\s+(\S+)$"))
-@rishabh()
-async def cmd_setbot(event):
-    if not await _is_owner(event):
-        return
-    try:
-        token = event.pattern_match.group(1).strip()
-        if ":" not in token or len(token) < 40:
-            return await _safe_reply(event, f"❌ Invalid token (len={len(token)})")
-        try: await event.delete()
-        except: pass
-        QUEUE_BOT_CONFIG_FILE.write_text(
-            json.dumps({"token": token, "saved_at": wat_now().strftime("%Y-%m-%d %H:%M:%S")}, indent=2),
-            encoding="utf-8"
-        )
-        await _safe_reply(event, f"✅ Token saved ({len(token)} chars). Run `.kce bot restart`.")
-    except Exception as e:
-        await send_log(f"❌ setbot error: `{e}`")
-
-
-@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+bot\s+status$"))
-@rishabh()
-async def cmd_bot_status(event):
-    if not await _is_owner(event):
-        return
-    try:
-        if not QUEUE_BOT_TOKEN:
-            return await _safe_reply(event, "❌ No token. Run `.kce setbot <token>`.")
-        if QUEUE_BOT and QUEUE_BOT.is_connected():
-            me = await QUEUE_BOT.get_me()
-            return await _safe_reply(event, f"✅ **Queue bot online**\n👤 @{me.username}\n🆔 `{me.id}`")
-        await _safe_reply(event, "⚠️ Not connected — try `.kce bot restart`")
-    except Exception as e:
-        await send_log(f"❌ bot status error: `{e}`")
-
-
-@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+bot\s+restart$"))
-@rishabh()
-async def cmd_bot_restart(event):
-    if not await _is_owner(event):
-        return
-    try:
-        global QUEUE_BOT, BOT_RUNNING, QUEUE_BOT_TOKEN
-        try:
-            if QUEUE_BOT and QUEUE_BOT.is_connected():
-                await QUEUE_BOT.disconnect()
-        except Exception:
-            pass
-        QUEUE_BOT = None
-        BOT_RUNNING = False
-        QUEUE_BOT_TOKEN = _load_bot_token()
-        if not QUEUE_BOT_TOKEN:
-            return await _safe_reply(event, "❌ No token. `.kce setbot <token>`")
-        await _safe_reply(event, f"🔄 Restarting (len={len(QUEUE_BOT_TOKEN)})...")
-        await _queue_bot_start()
-        await asyncio.sleep(2)
-        status = "✅ online" if (QUEUE_BOT and QUEUE_BOT.is_connected()) else "❌ offline"
-        await _safe_reply(event, f"Queue bot: {status}")
-    except Exception as e:
-        await send_log(f"❌ bot restart error: `{e}`")
-
-
-@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+diag$"))
-@rishabh()
-async def cmd_diag(event):
-    if not await _is_owner(event):
-        return
-    try:
-        lines = ["🔍 **KCE Diagnostics**", "━━━━━━━━━━━━━━━━━━━━"]
-        lines.append(f"{'✅' if QUEUE_BOT_TOKEN else '❌'} Token: {'set' if QUEUE_BOT_TOKEN else 'empty'}")
-        lines.append(f"{'✅' if QUEUE_BOT_CONFIG_FILE.exists() else '❌'} Config file")
-        if QUEUE_BOT:
-            conn = QUEUE_BOT.is_connected()
-            lines.append(f"🤖 Client: {'🟢 connected' if conn else '🔴 disconnected'}")
-        else:
-            lines.append("🤖 Client: **None**")
-        lines.append(f"⚙️ BOT_RUNNING: `{BOT_RUNNING}`")
-        lines.append(f"📝 Whitelisted: `{len(DB.get('whitelist', []))}`")
-        lines.append(f"❓ Quiz groups: `{len(DB.get('quiz_groups', []))}`")
-        lines.append(f"💰 Wallet groups: `{len(DB.get('wallet_groups', []))}`")
-        lines.append(f"💬 Reply groups: `{len(DB.get('reply_groups', []))}`")
-        await _safe_reply(event, "\n".join(lines))
-    except Exception as e:
-        await _safe_reply(event, f"❌ Diag error: `{e}`")
-
-
-# ═══════════════════════════════════════════════════════════════
-#  GROUP FLAG COMMANDS
-# ═══════════════════════════════════════════════════════════════
-
-@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+quiz\s+(on|off)\s+(\S+)$"))
-@rishabh()
-async def cmd_quiz_flag(event):
-    if not await _is_owner(event):
-        return
-    try:
-        action = event.pattern_match.group(1).lower()
-        link = event.pattern_match.group(2)
-        cid = await resolve_link_to_chat_id(link)
-        if cid is None:
-            return await _safe_reply(event, f"❌ Could not resolve `{link}`\nTry numeric ID: `-100...`")
-        groups = DB.get("quiz_groups", [])
-        if action == "on":
-            if cid in groups:
-                return await _safe_reply(event, f"ℹ️ Quiz already ON for `{cid}`")
-            groups.append(cid)
-            DB["quiz_groups"] = groups
-            save_db(DB)
-            await _safe_reply(event, f"✅ Quiz mode **ON** for `{cid}`")
-        else:
-            if cid not in groups:
-                return await _safe_reply(event, f"ℹ️ Quiz already OFF for `{cid}`")
-            groups.remove(cid)
-            DB["quiz_groups"] = groups
-            save_db(DB)
-            await _safe_reply(event, f"⏹️ Quiz mode **OFF** for `{cid}`")
-    except Exception as e:
-        await send_log(f"❌ quiz flag error: `{e}`")
-
-
-@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+wallet\s+(on|off)\s+(\S+)$"))
-@rishabh()
-async def cmd_wallet_flag(event):
-    if not await _is_owner(event):
-        return
-    try:
-        action = event.pattern_match.group(1).lower()
-        link = event.pattern_match.group(2)
-        cid = await resolve_link_to_chat_id(link)
-        if cid is None:
-            return await _safe_reply(event, f"❌ Could not resolve `{link}`\nTry numeric ID: `-100...`")
-        groups = DB.get("wallet_groups", [])
-        if action == "on":
-            if cid in groups:
-                return await _safe_reply(event, f"ℹ️ Wallet already ON for `{cid}`")
-            groups.append(cid)
-            DB["wallet_groups"] = groups
-            save_db(DB)
-            await _safe_reply(event, f"✅ Wallet drop **ON** for `{cid}`")
-        else:
-            if cid not in groups:
-                return await _safe_reply(event, f"ℹ️ Wallet already OFF for `{cid}`")
-            groups.remove(cid)
-            DB["wallet_groups"] = groups
-            save_db(DB)
-            await _safe_reply(event, f"⏹️ Wallet drop **OFF** for `{cid}`")
-    except Exception as e:
-        await send_log(f"❌ wallet flag error: `{e}`")
-
-
-@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+reply\s+(on|off)\s+(\S+)$"))
-@rishabh()
-async def cmd_reply_flag(event):
-    if not await _is_owner(event):
-        return
-    try:
-        action = event.pattern_match.group(1).lower()
-        link = event.pattern_match.group(2)
-        cid = await resolve_link_to_chat_id(link)
-        if cid is None:
-            return await _safe_reply(event, f"❌ Could not resolve `{link}`\nTry numeric ID: `-100...`")
-        groups = DB.get("reply_groups", [])
-        if action == "on":
-            if cid in groups:
-                return await _safe_reply(event, f"ℹ️ Reply already ON for `{cid}`")
-            groups.append(cid)
-            DB["reply_groups"] = groups
-            save_db(DB)
-            await _safe_reply(event, f"✅ Reply mode **ON** for `{cid}`")
-        else:
-            if cid not in groups:
-                return await _safe_reply(event, f"ℹ️ Reply already OFF for `{cid}`")
-            groups.remove(cid)
-            DB["reply_groups"] = groups
-            save_db(DB)
-            await _safe_reply(event, f"⏹️ Reply mode **OFF** for `{cid}`")
-    except Exception as e:
-        await send_log(f"❌ reply flag error: `{e}`")
-
-
-@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+flags\s+list$"))
-@rishabh()
-async def cmd_flags_list(event):
-    if not await _is_owner(event):
-        return
-    try:
-        lines = ["📋 **KCE Group Flags**\n━━━━━━━━━━━━━━━━━━━━"]
-
-        async def _name(cid):
-            try:
-                e = await CipherElite.get_entity(cid)
-                return getattr(e, "title", str(cid))
-            except Exception:
-                return str(cid)
-
-        wl = DB.get("whitelist", [])
-        qg = DB.get("quiz_groups", [])
-        wg = DB.get("wallet_groups", [])
-        rg = DB.get("reply_groups", [])
-
-        lines.append(f"**Whitelisted ({len(wl)}):**")
-        for cid in wl:
-            lines.append(f"  • {await _name(cid)} (`{cid}`)")
-        lines.append(f"\n**Quiz ON ({len(qg)}):**")
-        for cid in qg:
-            lines.append(f"  • {await _name(cid)} (`{cid}`)")
-        lines.append(f"\n**Wallet ON ({len(wg)}):**")
-        for cid in wg:
-            lines.append(f"  • {await _name(cid)} (`{cid}`)")
-        lines.append(f"\n**Reply ON ({len(rg)}):**")
-        for cid in rg:
-            lines.append(f"  • {await _name(cid)} (`{cid}`)")
-
-        await _safe_reply(event, "\n".join(lines))
-    except Exception as e:
-        await send_log(f"❌ flags list error: `{e}`")
-
-# ═══ END OF BATCH 3 (FIXED) ═══
-
-# ═══ END OF BATCH 3 ═══
 
 # ═══════════════════════════════════════════════════════════════
 #  STATUS / STATS / MEMORY / HELP / TZ
@@ -1430,7 +838,7 @@ async def cmd_flags_list(event):
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce$"))
 @rishabh()
-async def cmd_kce_status(event):
+async def cmd_status(event):
     if not await _is_owner(event):
         return
     try:
@@ -1441,32 +849,36 @@ async def cmd_kce_status(event):
         started = DB.get("started", "?")
         gemini_ok = ai_config.is_enabled() and bool(ai_config.get_api_key())
         bl = DB.get("dm_blacklist", [])
-        bot_status = "✅ online" if (QUEUE_BOT and QUEUE_BOT.is_connected()) else "❌ offline"
+        wg = DB.get("wallet_groups", [])
+        aggro = "🔥 ON" if is_aggressive() else "off"
+        slow_until = DB.get("slow_mode_until", 0)
+        slow_st = "🟢 active" if slow_until and wat_now().timestamp() < slow_until else "off"
         msg = (
-            "🤖 **KCE AI Reply v3.0**\n"
+            "🤖 **KCE AI Reply v3.2**\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"🧠 Gemini: {'✅ Ready' if gemini_ok else '❌ Disabled'}\n"
             f"📝 Whitelisted: `{len(wl)}` groups\n"
-            f"❓ Quiz groups: `{len(DB.get('quiz_groups', []))}`\n"
-            f"💰 Wallet groups: `{len(DB.get('wallet_groups', []))}`\n"
+            f"💰 Wallet groups: `{len(wg)}`\n"
             f"💬 Replies sent: `{len(replies)}`\n"
             f"📅 Today: `{today}/{RATE_LIMIT_DAILY}`\n"
             f"⚡ Speed: `{CURRENT_SPEED}`\n"
+            f"🔥 Aggressive: `{aggro}`\n"
+            f"🐢 Slow mode: `{slow_st}`\n"
+            f"🧬 Persona phrases: `{len(DB.get('persona_phrases', []))}`\n"
             f"🕐 TZ: `WAT (UTC+1)`\n"
             f"🚫 DM blocked: `{len(bl)}`\n"
-            f"🤖 Queue bot: {bot_status}\n"
             f"🚀 Started: `{started}`\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"⚙️ Word limit: `{WORD_LIMIT}`"
         )
         await _safe_reply(event, msg)
     except Exception as e:
-        await send_log(f"❌ status error: `{e}`")
+        await send_log(f"❌ status err: `{e}`")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+stats$"))
 @rishabh()
-async def cmd_kce_stats(event):
+async def cmd_stats(event):
     if not await _is_owner(event):
         return
     try:
@@ -1474,55 +886,132 @@ async def cmd_kce_stats(event):
         replies = DB.get("replies", [])
         today = today_str()
         today_count = sum(1 for r in replies if r.get("date") == today)
+        wallet_count = sum(1 for r in replies if r.get("trigger") == "wallet")
         good = sum(1 for r in replies if r.get("feedback") == "good")
         bad = sum(1 for r in replies if r.get("feedback") == "bad")
-        correct = sum(1 for r in replies if r.get("feedback") == "correct")
-        quiz_total = sum(1 for r in replies if r.get("trigger") == "quiz")
         lines = [
             "📊 **KCE Stats**",
             "━━━━━━━━━━━━━━━━━━━━",
             f"💬 Total replies: `{len(replies)}`",
             f"📅 Today: `{today_count}`",
-            f"❓ Quiz replies: `{quiz_total}`",
-            "",
-            "**Feedback:**",
-            f"👍 Good: `{good}`",
-            f"👎 Bad: `{bad}`",
-            f"✏️ Correct: `{correct}`",
-            "",
+            f"💰 Wallet drops: `{wallet_count}`",
+            f"👍 Good: `{good}`  👎 Bad: `{bad}`",
             f"⚡ Speed: `{CURRENT_SPEED}`",
-            f"🕐 Per-user gap: `{MIN_GAP_SAME_USER}s`",
-            f"🚦 Per-group hourly cap: `{RATE_LIMIT_HOURLY}`",
+            f"🔥 Aggressive: `{'ON' if is_aggressive() else 'off'}`",
         ]
         await _safe_reply(event, "\n".join(lines))
     except Exception as e:
-        await send_log(f"❌ stats error: `{e}`")
+        await send_log(f"❌ stats err: `{e}`")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+memory$"))
 @rishabh()
-async def cmd_kce_memory(event):
+async def cmd_memory(event):
     if not await _is_owner(event):
         return
     try:
         replies = DB.get("replies", [])
         users = DB.get("replied_users", {})
+        gm = DB.get("group_memory", {})
         lines = [
             "🧠 **KCE Memory**",
             "━━━━━━━━━━━━━━━━━━━━",
             f"💾 Replies: `{len(replies)}` / 500",
             f"👥 Users: `{len(users)}`",
+            f"📁 Groups learned: `{len(gm)}`",
+            f"🧬 Persona phrases: `{len(DB.get('persona_phrases', []))}`",
             f"📁 DB: `DB/aireply.json`",
-            f"💰 Wallets: `DB/aireply_wallets.json`",
         ]
         await _safe_reply(event, "\n".join(lines))
     except Exception as e:
-        await send_log(f"❌ memory error: `{e}`")
+        await send_log(f"❌ memory err: `{e}`")
+
+
+@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+room$"))
+@rishabh()
+async def cmd_room(event):
+    if not await _is_owner(event):
+        return
+    try:
+        cid = event.chat_id
+        gm = DB.get("group_memory", {}).get(str(cid), {})
+        if not gm:
+            return await _safe_reply(event, "📭 No memory yet for this group.")
+        lines = [
+            "🏠 **Room read**",
+            "━━━━━━━━━━━━━━━━━━━━",
+            f"🎭 Tone: `{gm.get('tone', '?')}`",
+            f"📊 Mode: `{gm.get('mode', '?')}`",
+            f"⚡ Activity: `{gm.get('activity_rate', 0)}` msgs/min",
+            f"📨 Messages seen: `{gm.get('msg_count', 0)}`",
+            f"\n**Top phrases:**",
+            ", ".join(gm.get("top_phrases", [])[:15]),
+        ]
+        if gm.get("topics"):
+            lines.append(f"\n**Hot topics:**")
+            lines.append(", ".join(gm.get("topics", [])[:10]))
+        await _safe_reply(event, "\n".join(lines))
+    except Exception as e:
+        await send_log(f"❌ room err: `{e}`")
+
+
+@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+persona(?:\s+list)?$"))
+@rishabh()
+async def cmd_persona(event):
+    if not await _is_owner(event):
+        return
+    try:
+        pp = DB.get("persona_phrases", [])
+        if not pp:
+            return await _safe_reply(event, "📭 No persona phrases yet. Reply `good` to log cards to build persona.")
+        lines = [f"🧬 **Persona Phrases ({len(pp)})**\n"]
+        for p in pp[-30:]:
+            lines.append(f"• `{p}`")
+        await _safe_reply(event, "\n".join(lines))
+    except Exception as e:
+        await send_log(f"❌ persona err: `{e}`")
+
+
+@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+aggressive\s+(on|off)$"))
+@rishabh()
+async def cmd_aggressive(event):
+    if not await _is_owner(event):
+        return
+    try:
+        mode = event.pattern_match.group(1).lower()
+        DB["aggressive"] = (mode == "on")
+        save_db(DB)
+        if mode == "on":
+            await _safe_reply(
+                event,
+                "🔥 **AGGRESSIVE MODE ON**\n"
+                f"• Trigger: any message ≥{AGGRESSIVE_MIN_WORDS} words\n"
+                f"• Delay: `{AGGRESSIVE_SPEED[0]}-{AGGRESSIVE_SPEED[1]}s`\n"
+                f"• Hourly cap: `{AGGRESSIVE_HOURLY}`\n"
+                f"• Reaction chance: `{int(AGGRESSIVE_REACT_PROB*100)}%`"
+            )
+        else:
+            await _safe_reply(event, "😌 **Aggressive mode OFF**")
+    except Exception as e:
+        await send_log(f"❌ aggressive err: `{e}`")
+
+
+@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+summary$"))
+@rishabh()
+async def cmd_summary(event):
+    if not await _is_owner(event):
+        return
+    try:
+        await _safe_reply(event, "⏳ Generating summary...")
+        await send_daily_summary()
+        await _safe_reply(event, "✅ Sent to log.")
+    except Exception as e:
+        await send_log(f"❌ summary err: `{e}`")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+replies(?:\s+(\d+))?$"))
 @rishabh()
-async def cmd_kce_replies(event):
+async def cmd_replies(event):
     if not await _is_owner(event):
         return
     try:
@@ -1542,12 +1031,12 @@ async def cmd_kce_replies(event):
             )
         await _safe_reply(event, "\n".join(lines))
     except Exception as e:
-        await send_log(f"❌ replies error: `{e}`")
+        await send_log(f"❌ replies err: `{e}`")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+reset$"))
 @rishabh()
-async def cmd_kce_reset(event):
+async def cmd_reset(event):
     if not await _is_owner(event):
         return
     try:
@@ -1555,54 +1044,53 @@ async def cmd_kce_reset(event):
         DB["replied_users"] = {}
         DB["hourly"] = {}
         DB["daily"] = {"date": today_str(), "count": 0}
+        DB["group_memory"] = {}
+        DB["persona_phrases"] = []
         save_db(DB)
-        await _safe_reply(event, "🔄 Memory cleared.")
+        await _safe_reply(event, "🔄 Memory + learning cleared.")
     except Exception as e:
-        await send_log(f"❌ reset error: `{e}`")
+        await send_log(f"❌ reset err: `{e}`")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+help$"))
 @rishabh()
-async def cmd_kce_help(event):
+async def cmd_help(event):
     if not await _is_owner(event):
         return
     try:
         msg = (
-            "🤖 **KCE AI Reply v3.0 — Commands**\n"
+            "🤖 **KCE AI Reply v3.2 — Commands**\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             "`.kce` — status\n"
-            "`.kce stats` — stats\n"
+            "`.kce stats` — reply stats\n"
             "`.kce memory` — memory info\n"
+            "`.kce room` — current room read\n"
+            "`.kce persona list` — learned phrases\n"
+            "`.kce summary` — trigger daily summary\n"
             "`.kce replies [n]` — last N\n"
-            "`.kce reset` — clear memory\n"
+            "`.kce reset` — clear all\n"
             "`.kce speed fast|normal|slow`\n"
-            "`.kce online` — heartbeat\n"
+            "`.kce aggressive on|off` — 🔥 mode\n"
             "`.kce tz` — timezone\n"
-            "`.kce setbot <token>` — save bot token\n"
-            "`.kce bot status|restart`\n"
-            "`.kce diag` — diagnostics\n"
-            "\n**Group flags (from DM):**\n"
+            "\n**Whitelist:**\n"
             "`.kcew` / `.kcew off` / `.kcew list`\n"
-            "`.kce quiz on|off <link>`\n"
-            "`.kce wallet on|off <link>`\n"
-            "`.kce reply on|off <link>`\n"
-            "`.kce flags list`\n"
-            "\n**Wallets:**\n"
+            "\n**Wallet:**\n"
             "`.kce wallet set sol|evm|sui <addr>`\n"
             "`.kce wallet list`\n"
-            "\n**Mods:**\n"
-            "`.kce mods add|remove|list [<link>]`\n"
+            "`.kce wallet on|off <link|id>`\n"
             "\n**DM blacklist:**\n"
-            "`.kce dm block|unblock|list`"
+            "`.kce dm block|unblock|list`\n"
+            "\n**Feedback:**\n"
+            "Reply `good` or `bad` to any log card"
         )
         await _safe_reply(event, msg)
     except Exception as e:
-        await send_log(f"❌ help error: `{e}`")
+        await send_log(f"❌ help err: `{e}`")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+speed\s+(fast|normal|slow)$"))
 @rishabh()
-async def cmd_kce_speed(event):
+async def cmd_speed(event):
     global CURRENT_SPEED
     if not await _is_owner(event):
         return
@@ -1612,12 +1100,12 @@ async def cmd_kce_speed(event):
         lo, hi = SPEED_MODES[mode]
         await _safe_reply(event, f"⚡ Speed: **{mode}** ({lo}-{hi}s)")
     except Exception as e:
-        await send_log(f"❌ speed error: `{e}`")
+        await send_log(f"❌ speed err: `{e}`")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+tz$"))
 @rishabh()
-async def cmd_kce_tz(event):
+async def cmd_tz(event):
     if not await _is_owner(event):
         return
     try:
@@ -1628,63 +1116,66 @@ async def cmd_kce_tz(event):
             f"🕐 Now: `{now.strftime('%I:%M:%S %p — %d/%m/%Y')}`"
         )
     except Exception as e:
-        await send_log(f"❌ tz error: `{e}`")
+        await send_log(f"❌ tz err: `{e}`")
 
 
+print("[aireply] MODULE LOADED — chunk 2")
+
+# ═══ END OF BATCH 2 ═══
 # ═══════════════════════════════════════════════════════════════
 #  WHITELIST (.kcew)
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kcew$"))
-async def cmd_kcew_add(event):
+async def cmd_wl_add(event):
     if not await _is_owner(event):
         return
     try:
         try: await event.delete()
         except: pass
         chat = await event.get_chat()
-        chat_id = event.chat_id
-        chat_name = getattr(chat, "title", "Unknown")
+        cid = event.chat_id
+        name = getattr(chat, "title", "Unknown")
         wl = DB.get("whitelist", [])
-        if chat_id in wl:
-            return await send_log(f"ℹ️ Already whitelisted: **{chat_name}**")
-        wl.append(chat_id)
+        if cid in wl:
+            return await send_log(f"ℹ️ Already whitelisted: **{name}**")
+        wl.append(cid)
         DB["whitelist"] = wl
         save_db(DB)
-        await send_log(f"✅ Whitelisted **{chat_name}** (`{chat_id}`). Total: `{len(wl)}`")
+        await send_log(f"✅ Whitelisted **{name}** (`{cid}`). Total: `{len(wl)}`")
     except Exception as e:
-        await send_log(f"❌ wl add: `{e}`")
+        await send_log(f"❌ wl add err: `{e}`")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kcew\s+off(?:\s+(-?\d+))?$"))
-async def cmd_kcew_remove(event):
+async def cmd_wl_remove(event):
     if not await _is_owner(event):
         return
     try:
         target = event.pattern_match.group(1)
         if target:
-            chat_id = int(target)
-            chat_name = f"ID {chat_id}"
+            cid = int(target)
+            cname = f"ID {cid}"
         else:
             try: await event.delete()
             except: pass
             chat = await event.get_chat()
-            chat_id = event.chat_id
-            chat_name = getattr(chat, "title", "Unknown")
+            cid = event.chat_id
+            cname = getattr(chat, "title", "Unknown")
         wl = DB.get("whitelist", [])
-        if chat_id not in wl:
-            return await send_log(f"ℹ️ Not whitelisted: `{chat_id}`")
-        wl.remove(chat_id)
+        if cid not in wl:
+            return await send_log(f"ℹ️ Not whitelisted: `{cid}`")
+        wl.remove(cid)
         DB["whitelist"] = wl
         save_db(DB)
-        await send_log(f"🗑️ Removed **{chat_name}** (`{chat_id}`)")
+        await send_log(f"🗑️ Removed **{cname}** (`{cid}`)")
     except Exception as e:
-        await send_log(f"❌ wl remove: `{e}`")
+        await send_log(f"❌ wl remove err: `{e}`")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kcew\s+list$"))
 @rishabh()
-async def cmd_kcew_list(event):
+async def cmd_wl_list(event):
     if not await _is_owner(event):
         return
     try:
@@ -1701,26 +1192,12 @@ async def cmd_kcew_list(event):
             lines.append(f"• **{name}** (`{cid}`)")
         await _safe_reply(event, "\n".join(lines))
     except Exception as e:
-        await send_log(f"❌ wl list: `{e}`")
+        await send_log(f"❌ wl list err: `{e}`")
 
 
 # ═══════════════════════════════════════════════════════════════
-#  DM BLACKLIST
+#  DM BLACKLIST (.kce dm)
 # ═══════════════════════════════════════════════════════════════
-
-async def _resolve_user_id(target_str):
-    try:
-        target = target_str.strip().lstrip("@")
-        if target.isdigit() or (target.startswith("-") and target[1:].isdigit()):
-            return int(target)
-        try:
-            entity = await CipherElite.get_entity(target)
-            return entity.id
-        except Exception:
-            return None
-    except Exception:
-        return None
-
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+dm\s+block\s+(\S+)$"))
 @rishabh()
@@ -1739,7 +1216,7 @@ async def cmd_dm_block(event):
         save_db(DB)
         await _safe_reply(event, f"🚫 Blocked `{uid}`. Total: `{len(bl)}`")
     except Exception as e:
-        await send_log(f"❌ dm block: `{e}`")
+        await send_log(f"❌ dm block err: `{e}`")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+dm\s+unblock(?:\s+(\S+))?$"))
@@ -1751,10 +1228,7 @@ async def cmd_dm_unblock(event):
         target = event.pattern_match.group(1)
         if not target:
             if not event.is_reply:
-                return await _safe_reply(
-                    event,
-                    "❌ Reply to a card, or use `.kce dm unblock <id|@user>`"
-                )
+                return await _safe_reply(event, "❌ Reply to a card, or `.kce dm unblock <id|@user>`")
             replied = await event.get_reply_message()
             text = replied.raw_text or ""
             m = re.search(r'🆔\s*`(\d+)`', text) or re.search(r'`(\d{6,})`', text)
@@ -1773,7 +1247,7 @@ async def cmd_dm_unblock(event):
         save_db(DB)
         await _safe_reply(event, f"✅ Unblocked `{uid}`. Total: `{len(bl)}`")
     except Exception as e:
-        await send_log(f"❌ dm unblock: `{e}`")
+        await send_log(f"❌ dm unblock err: `{e}`")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+dm\s+list$"))
@@ -1795,11 +1269,11 @@ async def cmd_dm_list(event):
             lines.append(f"• **{name}** (`{uid}`)")
         await _safe_reply(event, "\n".join(lines))
     except Exception as e:
-        await send_log(f"❌ dm list: `{e}`")
+        await send_log(f"❌ dm list err: `{e}`")
 
 
 # ═══════════════════════════════════════════════════════════════
-#  WALLET CONFIG
+#  WALLET (.kce wallet)
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+wallet\s+set\s+(sol|evm|sui)\s+(\S+)$"))
@@ -1819,7 +1293,7 @@ async def cmd_wallet_set(event):
         save_wallets(WALLETS)
         await _safe_reply(event, f"✅ {chain.upper()} wallet saved:\n`{addr}`")
     except Exception as e:
-        await send_log(f"❌ wallet set: `{e}`")
+        await send_log(f"❌ wallet set err: `{e}`")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+wallet\s+list$"))
@@ -1837,89 +1311,299 @@ async def cmd_wallet_list(event):
                 lines.append(f"❌ **{chain.upper()}**: not set")
         await _safe_reply(event, "\n".join(lines))
     except Exception as e:
-        await send_log(f"❌ wallet list: `{e}`")
+        await send_log(f"❌ wallet list err: `{e}`")
 
 
-# ═══════════════════════════════════════════════════════════════
-#  MODS
-# ═══════════════════════════════════════════════════════════════
-
-@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+mods\s+(add|remove)\s+(\S+)(?:\s+(\S+))?$"))
+@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+wallet\s+(on|off)\s+(\S+)$"))
 @rishabh()
-async def cmd_mods_add_remove(event):
+async def cmd_wallet_flag(event):
     if not await _is_owner(event):
         return
     try:
         action = event.pattern_match.group(1).lower()
-        user_str = event.pattern_match.group(2)
-        link = event.pattern_match.group(3)
-        uid = await _resolve_user_id(user_str)
-        if uid is None:
-            return await _safe_reply(event, f"❌ Could not resolve `{user_str}`")
-        if link:
-            cid = await resolve_link_to_chat_id(link)
-            if cid is None:
-                return await _safe_reply(event, f"❌ Could not resolve `{link}`")
-        else:
-            cid = event.chat_id if event.is_group else None
-            if cid is None:
-                return await _safe_reply(event, "❌ Specify group link or run in group.")
-        tm = DB.get("trusted_mods", {})
-        lst = tm.get(str(cid), [])
-        if action == "add":
-            if uid in lst:
-                return await _safe_reply(event, f"ℹ️ `{uid}` already trusted in `{cid}`")
-            lst.append(uid)
-            tm[str(cid)] = lst
-            DB["trusted_mods"] = tm
+        link = event.pattern_match.group(2)
+        cid = await resolve_link_to_chat_id(link)
+        if cid is None:
+            return await _safe_reply(event, f"❌ Could not resolve `{link}`")
+        groups = DB.get("wallet_groups", [])
+        if action == "on":
+            if cid in groups:
+                return await _safe_reply(event, f"ℹ️ Wallet already ON for `{cid}`")
+            groups.append(cid)
+            DB["wallet_groups"] = groups
             save_db(DB)
-            await _safe_reply(event, f"✅ Added mod `{uid}` in `{cid}`")
+            await _safe_reply(event, f"✅ Wallet drop **ON** for `{cid}`")
         else:
-            if uid not in lst:
-                return await _safe_reply(event, f"ℹ️ `{uid}` not in mods for `{cid}`")
-            lst.remove(uid)
-            tm[str(cid)] = lst
-            DB["trusted_mods"] = tm
+            if cid not in groups:
+                return await _safe_reply(event, f"ℹ️ Wallet already OFF for `{cid}`")
+            groups.remove(cid)
+            DB["wallet_groups"] = groups
             save_db(DB)
-            await _safe_reply(event, f"🗑️ Removed mod `{uid}` from `{cid}`")
+            await _safe_reply(event, f"⏹️ Wallet drop **OFF** for `{cid}`")
     except Exception as e:
-        await send_log(f"❌ mods error: `{e}`")
+        await send_log(f"❌ wallet flag err: `{e}`")
 
 
-@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+mods\s+list(?:\s+(\S+))?$"))
-@rishabh()
-async def cmd_mods_list(event):
-    if not await _is_owner(event):
-        return
+# ═══════════════════════════════════════════════════════════════
+#  GROUP MEMORY LEARNER — every message in whitelisted groups
+# ═══════════════════════════════════════════════════════════════
+
+@CipherElite.on(events.NewMessage)
+async def group_memory_learner(event):
     try:
-        link = event.pattern_match.group(1)
-        if link:
-            cid = await resolve_link_to_chat_id(link)
-            if cid is None:
-                return await _safe_reply(event, f"❌ Could not resolve `{link}`")
-        else:
-            cid = event.chat_id if event.is_group else None
-            if cid is None:
-                return await _safe_reply(event, "❌ Specify link or run in group.")
-        tm = DB.get("trusted_mods", {})
-        lst = tm.get(str(cid), [])
-        if not lst:
-            return await _safe_reply(event, f"📭 No custom mods in `{cid}`.")
-        lines = [f"👑 **Trusted mods in `{cid}`**\n"]
-        for uid in lst:
-            try:
-                e = await CipherElite.get_entity(uid)
-                name = format_user(e)
-            except Exception:
-                name = "Unknown"
-            lines.append(f"• **{name}** (`{uid}`)")
-        await _safe_reply(event, "\n".join(lines))
+        if event.out:
+            return
+        if not is_whitelisted(event.chat_id):
+            return
+        text = event.raw_text or ""
+        if not text or text.startswith((".", "..")):
+            return
+        me = await CipherElite.get_me()
+        sender = await event.get_sender()
+        if sender and sender.id == me.id:
+            return
+        record_message(event.chat_id, text, event.sender_id)
     except Exception as e:
-        await send_log(f"❌ mods list: `{e}`")
-
-# ═══ END OF BATCH 4 ═══
+        print(f"[aireply] memory learner err: {e}")
 
 
+async def memory_flusher_loop():
+    """Every 60s, flush buffered messages into group memory."""
+    await asyncio.sleep(30)
+    while True:
+        try:
+            for cid in list(_mem_buffer.keys()):
+                try:
+                    flush_memory(cid)
+                except Exception as e:
+                    print(f"[aireply] flush err for {cid}: {e}")
+        except Exception as e:
+            print(f"[aireply] flusher err: {e}")
+        await asyncio.sleep(LEARN_BATCH_SECONDS)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  TYPING WATCHER — slow mode detection
+# ═══════════════════════════════════════════════════════════════
+
+_typing_users = {}  # {chat_id: {user_id: last_ts}}
+
+
+@CipherElite.on(events.Raw(events.UserUpdate))
+async def typing_watcher(event):
+    try:
+        if not is_whitelisted(event.chat_id if hasattr(event, 'chat_id') else None):
+            return
+        from telethon.tl.types import (
+            UpdateUserTyping, UpdateChatUserTyping,
+            SendMessageTypingAction,
+        )
+        chat_id = None
+        user_id = None
+
+        if isinstance(event, UpdateUserTyping):
+            user_id = event.user_id
+            chat_id = user_id  # private
+        elif isinstance(event, UpdateChatUserTyping):
+            chat_id = event.chat_id
+            user_id = event.from_id
+        else:
+            return
+
+        if not is_whitelisted(chat_id):
+            return
+
+        # only count "typing" action
+        action = getattr(event, "action", None)
+        if not isinstance(action, SendMessageTypingAction):
+            return
+
+        users = _typing_users.setdefault(chat_id, {})
+        users[user_id] = time.time()
+
+        # purge old (>5s)
+        now = time.time()
+        users = {u: t for u, t in users.items() if now - t < 5}
+        _typing_users[chat_id] = users
+
+        count = len(users)
+        if count >= SLOW_MODE_THRESHOLD:
+            DB["slow_mode_until"] = now + SLOW_MODE_EXTRA_DELAY
+            save_db(DB)
+            dbg(f"slow mode ON in {chat_id} ({count} typers)")
+        elif count <= SLOW_MODE_RESET:
+            # if below threshold, let slow mode expire naturally
+            pass
+    except Exception as e:
+        # silent — typing events are noisy
+        pass
+
+
+# ═══════════════════════════════════════════════════════════════
+#  ADMIN ACTIVITY WATCHER
+# ═══════════════════════════════════════════════════════════════
+
+@CipherElite.on(events.NewMessage)
+async def admin_activity_watcher(event):
+    try:
+        if event.out:
+            return
+        if not is_whitelisted(event.chat_id):
+            return
+        sender = await event.get_sender()
+        if not sender:
+            return
+        # check if sender is admin
+        try:
+            perms = await CipherElite.get_permissions(event.chat_id, sender.id)
+            is_admin = bool(getattr(perms, "is_admin", False) or getattr(perms, "is_creator", False))
+        except Exception:
+            is_admin = False
+        if is_admin:
+            al = DB.get("admin_last_seen", {})
+            al[str(event.chat_id)] = time.time()
+            DB["admin_last_seen"] = al
+            save_db(DB)
+    except Exception as e:
+        pass  # silent
+
+
+def is_admin_recently_active(chat_id, window=120):
+    """True if admin was active in chat within window seconds."""
+    al = DB.get("admin_last_seen", {})
+    last = al.get(str(chat_id), 0)
+    if not last:
+        return False
+    return (time.time() - last) < window
+
+
+# ═══════════════════════════════════════════════════════════════
+#  FEEDBACK WATCHER — reply `good` / `bad` to log cards
+# ═══════════════════════════════════════════════════════════════
+
+@CipherElite.on(events.NewMessage(chats=AI_LOG_CHAT_ID))
+async def feedback_watcher(event):
+    try:
+        me = await CipherElite.get_me()
+        if event.sender_id != me.id:
+            return
+        text = (event.raw_text or "").strip().lower()
+        if text not in ("good", "bad"):
+            return
+        if not event.is_reply:
+            return
+        replied = await event.get_reply_message()
+        if not replied:
+            return
+        card_text = replied.raw_text or ""
+        # extract reply number from card — pattern: "#N" with  •  #N or  #N
+        m = re.search(r'#(\d+)\s*$', card_text, re.MULTILINE) or re.search(r'#(\d+)', card_text)
+        if not m:
+            return
+        n = int(m.group(1))
+
+        # update feedback
+        replies = DB.get("replies", [])
+        target = None
+        for r in replies:
+            if r.get("n") == n:
+                target = r
+                r["feedback"] = text
+                break
+        if not target:
+            return
+        save_db(DB)
+        dbg(f"feedback recorded: #{n} = {text}")
+
+        # if good → add to persona
+        if text == "good":
+            persona_add(target.get("bot_reply", ""))
+
+        # react to confirm
+        try:
+            emoji = "👍" if text == "good" else "👎"
+            await event.reply(f"{emoji} Logged #{n} as {text}")
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"[aireply] feedback err: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  DAILY SUMMARY
+# ═══════════════════════════════════════════════════════════════
+
+async def send_daily_summary():
+    try:
+        today = today_str()
+        replies = DB.get("replies", [])
+        today_replies = [r for r in replies if r.get("date") == today]
+        good = sum(1 for r in today_replies if r.get("feedback") == "good")
+        bad = sum(1 for r in today_replies if r.get("feedback") == "bad")
+        gm = DB.get("group_memory", {})
+
+        lines = [
+            "╔══════════════════════════════════════╗",
+            f"║  📊  KCE DAILY SUMMARY — {today}",
+            "║  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+            "╚══════════════════════════════════════╝",
+            "",
+            f"💬 Replies today: `{len(today_replies)}`",
+            f"👍 Good: `{good}`  👎 Bad: `{bad}`",
+            f"📁 Groups learned: `{len(gm)}`",
+            f"🧬 Persona phrases: `{len(DB.get('persona_phrases', []))}`",
+            "",
+        ]
+
+        # top groups
+        per_group = {}
+        for r in today_replies:
+            g = r.get("group_name", "?")
+            per_group[g] = per_group.get(g, 0) + 1
+        top = sorted(per_group.items(), key=lambda kv: -kv[1])[:3]
+        if top:
+            lines.append("**Top groups today:**")
+            for g, c in top:
+                lines.append(f"  • {g[:30]} — `{c}` replies")
+
+        # sample replies
+        if today_replies:
+            lines.append("")
+            lines.append("**Sample replies:**")
+            for r in today_replies[-5:]:
+                lines.append(f"  • \"{r.get('bot_reply', '')[:40]}\"  →  {r.get('user_name', '')[:20]}")
+
+        card = "\n".join(lines)
+        await send_log(card)
+        dbg("daily summary sent")
+    except Exception as e:
+        print(f"[aireply] daily summary err: {e}")
+
+
+async def daily_summary_loop():
+    """Fire once at 23:59 WAT."""
+    await asyncio.sleep(20)
+    while True:
+        try:
+            now = wat_now()
+            # target 23:59 WAT
+            if now.hour == 23 and now.minute == 59:
+                # check we haven't fired today
+                last = DB.get("last_summary_date", "")
+                if last != today_str():
+                    DB["last_summary_date"] = today_str()
+                    save_db(DB)
+                    await send_daily_summary()
+                await asyncio.sleep(60)  # wait past minute
+            await asyncio.sleep(30)
+        except Exception as e:
+            print(f"[aireply] summary loop err: {e}")
+            await asyncio.sleep(60)
+
+
+print("[aireply] MODULE LOADED — chunk 3")
+
+# ═══ END OF BATCH 3 ═══
 # ═══════════════════════════════════════════════════════════════
 #  SMART CONTEXT
 # ═══════════════════════════════════════════════════════════════
@@ -1934,16 +1618,16 @@ async def _get_smart_context(event, me, limit=5):
                 ctx.append(f"[{name}]: {replied.raw_text[:150]}")
         sender_id = event.sender_id
         msgs = await CipherElite.get_messages(event.chat_id, limit=limit + 3)
-        same_user_msgs = []
+        same_user = []
         for m in msgs:
             if m.id == event.message.id:
                 continue
             if m.sender_id == sender_id and m.raw_text and not m.raw_text.startswith((".", "..")):
-                same_user_msgs.append(f"[them]: {m.raw_text[:150]}")
-        same_user_msgs = same_user_msgs[:3]
-        ctx.extend(same_user_msgs)
+                same_user.append(f"[them]: {m.raw_text[:150]}")
+        same_user = same_user[:3]
+        ctx.extend(same_user)
     except Exception as e:
-        dbg(f"context error: {e}")
+        dbg(f"context err: {e}")
     return ctx[-limit:]
 
 
@@ -1951,11 +1635,11 @@ async def _fire_online():
     try:
         await CipherElite(functions.account.UpdateStatusRequest(offline=False))
     except Exception as e:
-        dbg(f"online ping error: {e}")
+        dbg(f"online ping err: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════
-#  AI REPLY HANDLER (keyword mode)
+#  KEYWORD REPLY HANDLER (v3.2 — aggressive + slow mode + room)
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage)
@@ -1984,11 +1668,14 @@ async def kce_reply_handler(event):
             triggered, trigger_type = True, "mention"
         if not triggered and has_trigger(text):
             triggered, trigger_type = True, "keyword"
+        # aggressive: any 3+ word message
+        if not triggered and is_aggressive() and aggressive_trigger(text):
+            triggered, trigger_type = True, "aggressive"
 
         if not triggered:
             return
 
-        dbg(f"trigger={trigger_type} chat={event.chat_id} user={sender.id if sender else '?'} text='{text[:50]}'")
+        dbg(f"trigger={trigger_type} aggro={is_aggressive()} chat={event.chat_id} text='{text[:50]}'")
 
         user_id = event.sender_id
         if not can_reply_to_user(user_id):
@@ -1997,32 +1684,32 @@ async def kce_reply_handler(event):
         if not can_reply_in_group(event.chat_id):
             dbg("block: hourly cap")
             chat = await event.get_chat()
-            await queue_item(
-                f"⚠️ Hourly cap in **{getattr(chat, 'title', '?')}**",
-                buttons=make_cap_buttons()
-            )
+            await queue_item(f"⚠️ Hourly cap in **{getattr(chat, 'title', '?')}**")
             return
         if not can_reply_daily():
             dbg("block: daily cap")
-            await queue_item("🚨 **Daily cap reached**", alert=True, buttons=make_cap_buttons())
+            await queue_item("🚨 **Daily cap reached**", alert=True)
             return
 
         context = await _get_smart_context(event, me, limit=5)
-        reply_text = await generate_reply(text, context)
+        reply_text = await generate_reply(text, context, chat_id=event.chat_id)
         if not reply_text:
             chat = await event.get_chat()
             await queue_item(
-                f"⚠️ **Gemini failed**\nGroup: `{getattr(chat, 'title', '?')}`\nSaid: \"{text[:100]}\"",
-                buttons=make_error_buttons()
+                f"⚠️ **Gemini failed**\nGroup: `{getattr(chat, 'title', '?')}`\nSaid: \"{text[:100]}\""
             )
             return
 
-        delay = get_delay()
-        dbg(f"delay {delay}s")
+        # delay — includes slow mode extra
+        base_delay = get_delay()
+        slow_extra = get_slow_mode_extra()
+        total_delay = base_delay + slow_extra
+        dbg(f"delay {base_delay}s + slow {slow_extra}s = {total_delay}s")
+
         try:
             await _fire_online()
-            first_half = max(1, delay // 2)
-            second_half = max(1, delay - first_half)
+            first_half = max(1, total_delay // 2)
+            second_half = max(1, total_delay - first_half)
             async with CipherElite.action(event.chat_id, "typing"):
                 await asyncio.sleep(first_half)
             await asyncio.sleep(random.uniform(0.5, 1.5))
@@ -2030,7 +1717,7 @@ async def kce_reply_handler(event):
                 await asyncio.sleep(second_half)
         except Exception as e:
             dbg(f"typing failed: {e}")
-            await asyncio.sleep(delay)
+            await asyncio.sleep(total_delay)
 
         try:
             sent = await event.reply(reply_text)
@@ -2039,9 +1726,8 @@ async def kce_reply_handler(event):
             await asyncio.sleep(e.seconds + 1)
             sent = await event.reply(reply_text)
         except Exception as e:
-            print(f"[aireply] send error: {e}")
-            await queue_item(f"❌ **Reply failed** in `{event.chat_id}`: `{e}`",
-                             alert=True, buttons=make_error_buttons())
+            print(f"[aireply] send err: {e}")
+            await queue_item(f"❌ **Reply failed** in `{event.chat_id}`: `{e}`", alert=True)
             return
 
         track_reply(event.chat_id, user_id)
@@ -2055,6 +1741,10 @@ async def kce_reply_handler(event):
         reply_num = len(replies) + 1
         jump_link = build_jump_link(event.chat_id, event.message.id)
 
+        speed_label = "aggressive" if is_aggressive() else CURRENT_SPEED
+        if slow_extra:
+            speed_label += "+slow"
+
         record = {
             "n": reply_num,
             "group_name": chat_name,
@@ -2067,7 +1757,7 @@ async def kce_reply_handler(event):
             "date": stamp["date"],
             "ts": stamp["ts"],
             "trigger": trigger_type,
-            "speed": CURRENT_SPEED,
+            "speed": speed_label,
             "jump_link": jump_link,
             "feedback": None,
         }
@@ -2077,11 +1767,13 @@ async def kce_reply_handler(event):
 
         card = build_reply_card(
             reply_num, chat_name, user_name, text, reply_text,
-            speed=CURRENT_SPEED, jump_link=jump_link
+            speed=speed_label, jump_link=jump_link
         )
-        await send_log(card, buttons=make_feedback_buttons(reply_num))
+        await send_log(card)
 
-        if REACT_TO_GM and random.random() < REACT_PROBABILITY:
+        # reaction
+        react_prob = AGGRESSIVE_REACT_PROB if is_aggressive() else REACT_PROBABILITY
+        if REACT_TO_GM and random.random() < react_prob:
             try:
                 await sent.react(random.choice(REACTION_EMOJIS))
             except Exception:
@@ -2091,11 +1783,99 @@ async def kce_reply_handler(event):
         print(f"[aireply] FloodWait {e.seconds}s")
         await asyncio.sleep(e.seconds + 1)
     except Exception as e:
-        print(f"[aireply] handler error: {e}")
+        print(f"[aireply] handler err: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════
-#  DM WATCHER (suspicious only)
+#  WALLET DROP WATCHER
+# ═══════════════════════════════════════════════════════════════
+
+@CipherElite.on(events.NewMessage)
+async def kce_wallet_watcher(event):
+    try:
+        if event.out:
+            return
+        if not is_wallet_group(event.chat_id):
+            return
+        text = event.raw_text or ""
+        if not text or text.startswith((".", "..")):
+            return
+
+        me = await CipherElite.get_me()
+        sender = await event.get_sender()
+        if sender and sender.id == me.id:
+            return
+
+        hits = []
+        for chain, pat in WALLET_PATTERNS.items():
+            if pat.findall(text):
+                hits.append(chain)
+
+        if not hits:
+            return
+
+        chain = None
+        if "sui" in hits and WALLETS.get("sui"):
+            chain = "sui"
+        elif "evm" in hits and WALLETS.get("evm"):
+            chain = "evm"
+        elif "sol" in hits and WALLETS.get("sol"):
+            chain = "sol"
+
+        if not chain:
+            dbg(f"wallet detected but no config for {hits}")
+            return
+
+        addr = WALLETS.get(chain)
+        dbg(f"wallet drop: chain={chain} reply={addr[:8]}...")
+
+        try:
+            await _fire_online()
+            async with CipherElite.action(event.chat_id, "typing"):
+                await asyncio.sleep(0.5)
+            await event.reply(addr)
+        except Exception as e:
+            print(f"[aireply] wallet send err: {e}")
+            return
+
+        stamp = now_dict()
+        chat = await event.get_chat()
+        chat_name = getattr(chat, "title", "Unknown")
+        user_name = format_user(sender)
+        jump_link = build_jump_link(event.chat_id, event.message.id)
+
+        replies = DB.get("replies", [])
+        reply_num = len(replies) + 1
+        record = {
+            "n": reply_num,
+            "group_name": chat_name,
+            "group_id": event.chat_id,
+            "user_name": user_name,
+            "user_id": event.sender_id,
+            "they_said": text[:200],
+            "bot_reply": addr,
+            "time12": stamp["time12"],
+            "date": stamp["date"],
+            "ts": stamp["ts"],
+            "trigger": "wallet",
+            "speed": "beast",
+            "jump_link": jump_link,
+            "feedback": None,
+        }
+        replies.append(record)
+        DB["replies"] = replies[-500:]
+        save_db(DB)
+
+        card = build_wallet_card(
+            reply_num, chat_name, user_name, text, chain, addr, jump_link=jump_link
+        )
+        await send_log(card)
+    except Exception as e:
+        print(f"[aireply] wallet watcher err: {e}")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  DM WATCHER — suspicious only
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage(func=lambda e: e.is_private and not e.out))
@@ -2123,9 +1903,9 @@ async def kce_dm_watcher(event):
             f"🕐 {wat_now().strftime('%I:%M:%S %p')} — {wat_now().strftime('%d/%m/%Y')} WAT\n"
             f"━━━━━━━━━━━━━━━━━━━━\n💬 \"{text[:400]}\""
         )
-        await queue_item(msg, alert=True, buttons=make_suspicious_buttons(sender_id))
+        await queue_item(msg, alert=True)
     except Exception as e:
-        print(f"[aireply] DM watcher error: {e}")
+        print(f"[aireply] DM watcher err: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2162,312 +1942,10 @@ async def kce_suspicious_reply_watcher(event):
             f"👤 **{sender_name}** (`{event.sender_id}`)\n"
             f"🕐 {wat_now().strftime('%I:%M:%S %p')} WAT\n"
             f"━━━━━━━━━━━━━━━━━━━━\n💬 \"{text[:400]}\"",
-            alert=True, buttons=make_suspicious_buttons(event.sender_id)
+            alert=True
         )
     except Exception as e:
-        print(f"[aireply] suspicious watcher error: {e}")
-
-
-# ═══════════════════════════════════════════════════════════════
-#  WALLET DROP WATCHER
-# ═══════════════════════════════════════════════════════════════
-
-@CipherElite.on(events.NewMessage)
-async def kce_wallet_watcher(event):
-    try:
-        if event.out:
-            return
-        if not is_wallet_group(event.chat_id):
-            return
-        text = event.raw_text or ""
-        if not text or text.startswith((".", "..")):
-            return
-
-        me = await CipherElite.get_me()
-        sender = await event.get_sender()
-        if sender and sender.id == me.id:
-            return
-
-        # check for any wallet pattern
-        hits = []
-        for chain, pat in WALLET_PATTERNS.items():
-            matches = pat.findall(text)
-            if matches:
-                hits.append(chain)
-
-        if not hits:
-            return
-
-        # prioritize: evm/sui (longer 0x) over sol if multiple matched
-        chain = None
-        if "sui" in hits and WALLETS.get("sui"):
-            chain = "sui"
-        elif "evm" in hits and WALLETS.get("evm"):
-            chain = "evm"
-        elif "sol" in hits and WALLETS.get("sol"):
-            chain = "sol"
-
-        if not chain:
-            dbg(f"wallet detected but no config for {hits}")
-            return
-
-        addr = WALLETS.get(chain)
-        dbg(f"wallet drop: chain={chain} reply={addr[:8]}...")
-
-        # beast mode — no delay
-        try:
-            await _fire_online()
-            async with CipherElite.action(event.chat_id, "typing"):
-                await asyncio.sleep(0.5)
-            sent = await event.reply(addr)
-        except Exception as e:
-            print(f"[aireply] wallet send error: {e}")
-            return
-
-        stamp = now_dict()
-        chat = await event.get_chat()
-        chat_name = getattr(chat, "title", "Unknown")
-        user_name = format_user(sender)
-        jump_link = build_jump_link(event.chat_id, event.message.id)
-
-        replies = DB.get("replies", [])
-        reply_num = len(replies) + 1
-        record = {
-            "n": reply_num,
-            "group_name": chat_name,
-            "group_id": event.chat_id,
-            "user_name": user_name,
-            "user_id": event.sender_id,
-            "they_said": text[:200],
-            "bot_reply": addr,
-            "time12": stamp["time12"],
-            "date": stamp["date"],
-            "ts": stamp["ts"],
-            "trigger": "wallet",
-            "speed": "beast",
-            "jump_link": jump_link,
-            "feedback": None,
-        }
-        replies.append(record)
-        DB["replies"] = replies[-500:]
-        save_db(DB)
-
-        card = (
-            "╔══════════════════════════════════════╗\n"
-            "║  💰⚡💥🔥  KCE WALLET DROP  🔥💥⚡💰\n"
-            "║  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"║  📍 {chat_name[:30]}\n"
-            f"║  👤 {user_name[:40]}\n"
-            f"║  🕐 {stamp['time12']} — {stamp['date']} WAT\n"
-            "╚══════════════════════════════════════╝\n"
-            f"\n💬 THEY DROPPED\n\"{text[:150]}\"\n"
-            f"\n💰 KCE REPLIED ({chain.upper()})\n\"{addr}\"\n"
-            f"\n⚡ BEAST MODE\n🔗 #{reply_num}\n"
-        )
-        if jump_link:
-            card += f"🔗 Jump: {jump_link}\n"
-        card += "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        await send_log(card)
-    except Exception as e:
-        print(f"[aireply] wallet watcher error: {e}")
-
-# ═══ END OF BATCH 5 ═══
-
-# ═══════════════════════════════════════════════════════════════
-#  QUIZ HANDLER — learn from mods, answer from 3rd question
-# ═══════════════════════════════════════════════════════════════
-
-async def _is_admin_or_trusted(chat_id, user_id):
-    """Check if user is Telegram admin or in trusted mods list."""
-    if user_id in get_trusted_mods(chat_id):
-        return True
-    try:
-        perms = await CipherElite.get_permissions(chat_id, user_id)
-        return bool(getattr(perms, "is_admin", False) or getattr(perms, "is_creator", False))
-    except Exception:
-        return False
-
-
-def _get_quiz_state(chat_id):
-    qs = DB.get("quiz_state", {})
-    return qs.get(str(chat_id), {
-        "seen_questions": [],
-        "learned_answers": [],
-        "learned_style": "",
-        "counter": 0,
-        "last_question_msg_id": None,
-        "last_question_text": None,
-        "pending_answers": {},   # {user_id: (msg_id, answer_text)}
-    })
-
-
-def _save_quiz_state(chat_id, state):
-    qs = DB.get("quiz_state", {})
-    qs[str(chat_id)] = state
-    DB["quiz_state"] = qs
-    save_db(DB)
-
-
-@CipherElite.on(events.NewMessage)
-async def kce_quiz_handler(event):
-    """
-    Two behaviors:
-    1. Learn: when a mod replies to someone's answer with a 'correct' signal,
-       remember that answer + style.
-    2. Answer: when a new quiz question appears and we've seen >= 2 answers
-       learned, answer in the learned style. 4 correct : 1 wrong pattern.
-    """
-    try:
-        if event.out:
-            return
-        if not is_quiz_group(event.chat_id):
-            return
-        text = event.raw_text or ""
-        if not text or text.startswith((".", "..")):
-            return
-
-        me = await CipherElite.get_me()
-        sender = await event.get_sender()
-        if sender and sender.id == me.id:
-            return
-
-        state = _get_quiz_state(event.chat_id)
-        sender_id = event.sender_id
-        lower = text.lower()
-
-        # ── LEARNING: this message is a mod's "correct" reply to an answer
-        if event.is_reply:
-            is_mod = await _is_admin_or_trusted(event.chat_id, sender_id)
-            if is_mod:
-                contains_signal = any(sig in lower for sig in QUIZ_CORRECT_SIGNALS)
-                if contains_signal:
-                    replied = await event.get_reply_message()
-                    if replied and replied.raw_text:
-                        correct_answer = replied.raw_text.strip()[:100]
-                        # add to learned answers (dedupe)
-                        learned = state.get("learned_answers", [])
-                        if correct_answer not in learned:
-                            learned.append(correct_answer)
-                            state["learned_answers"] = learned[-20:]
-                        # learned style — simplest: infer from recent corrects
-                        if len(learned) >= 2:
-                            # take the shortest learned answer as style hint
-                            shortest = min(learned[-5:], key=len)
-                            state["learned_style"] = f"like: '{shortest}'"
-                        _save_quiz_state(event.chat_id, state)
-                        dbg(f"quiz learned: '{correct_answer}' (total: {len(learned)})")
-                        return
-
-        # ── DETECT: is this a question?
-        # Question heuristics: ends with ? OR contains "what/which/who/when/where/why/how"
-        # OR is from a mod/admin
-        is_mod_sender = await _is_admin_or_trusted(event.chat_id, sender_id)
-        has_q_mark = "?" in text
-        has_q_word = any(
-            w in lower for w in
-            ("what", "which", "who ", "when", "where", "why", "how ", "name the", "pick")
-        )
-        is_question = is_mod_sender and (has_q_mark or has_q_word) and len(text) > 10
-
-        if is_question:
-            # track as latest question
-            state["last_question_msg_id"] = event.message.id
-            state["last_question_text"] = text[:300]
-            state["pending_answers"] = {}
-            _save_quiz_state(event.chat_id, state)
-            dbg(f"quiz question detected: '{text[:60]}'")
-
-            # can we answer? need at least 2 learned answers
-            learned = state.get("learned_answers", [])
-            if len(learned) < 2:
-                dbg(f"quiz learn phase — only {len(learned)} learned, skip")
-                return
-
-            # counter — 4 correct : 1 wrong
-            counter = state.get("counter", 0)
-            counter += 1
-            want_wrong = (counter % (QUIZ_CORRECT_RATIO + QUIZ_WRONG_RATIO) == 0)
-            state["counter"] = counter
-            _save_quiz_state(event.chat_id, state)
-
-            if want_wrong:
-                # deliberate wrong — pick random other learned answer or shuffle
-                pool = [a for a in learned if a.lower() not in lower]
-                if pool:
-                    answer_text = random.choice(pool)
-                    is_correct = False
-                else:
-                    answer_text = random.choice(learned)
-                    is_correct = False
-                dbg(f"quiz — deliberate WRONG: '{answer_text}'")
-            else:
-                answer_text = await generate_quiz_answer(
-                    text, learned, state.get("learned_style", "")
-                )
-                if not answer_text:
-                    answer_text = random.choice(learned)
-                is_correct = True
-                dbg(f"quiz — CORRECT attempt: '{answer_text}'")
-
-            # beast mode — no delay
-            try:
-                await _fire_online()
-                async with CipherElite.action(event.chat_id, "typing"):
-                    await asyncio.sleep(0.6)
-                sent = await event.reply(answer_text)
-                dbg(f"quiz answered: '{answer_text}'")
-            except Exception as e:
-                print(f"[aireply] quiz send error: {e}")
-                return
-
-            # log card
-            stamp = now_dict()
-            chat = await event.get_chat()
-            chat_name = getattr(chat, "title", "Unknown")
-            jump_link = build_jump_link(event.chat_id, event.message.id)
-
-            replies = DB.get("replies", [])
-            reply_num = len(replies) + 1
-            record = {
-                "n": reply_num,
-                "group_name": chat_name,
-                "group_id": event.chat_id,
-                "user_name": "QUIZ",
-                "user_id": 0,
-                "they_said": text[:200],
-                "bot_reply": answer_text,
-                "time12": stamp["time12"],
-                "date": stamp["date"],
-                "ts": stamp["ts"],
-                "trigger": "quiz",
-                "speed": "beast",
-                "jump_link": jump_link,
-                "feedback": None,
-                "quiz_correct": is_correct,
-            }
-            replies.append(record)
-            DB["replies"] = replies[-500:]
-            save_db(DB)
-
-            card = build_quiz_card(
-                reply_num, chat_name, text, answer_text, is_correct, jump_link=jump_link
-            )
-            await send_log(card, buttons=make_feedback_buttons(reply_num))
-            return
-
-        # ── Track peer answers (for potential future learning)
-        # if the last msg was a question and this is a reply to it, track pending answer
-        last_q_id = state.get("last_question_msg_id")
-        if last_q_id and event.is_reply:
-            replied = await event.get_reply_message()
-            if replied and replied.id == last_q_id:
-                pending = state.get("pending_answers", {})
-                pending[str(sender_id)] = (event.message.id, text[:100])
-                state["pending_answers"] = pending
-                _save_quiz_state(event.chat_id, state)
-
-    except Exception as e:
-        print(f"[aireply] quiz handler error: {e}")
+        print(f"[aireply] suspicious watcher err: {e}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -2484,13 +1962,13 @@ async def _heartbeat_loop():
             me = await CipherElite.get_me()
             dbg(f"heartbeat — @{getattr(me, 'username', '?')}")
         except Exception as e:
-            print(f"[aireply] heartbeat error: {e}")
+            print(f"[aireply] heartbeat err: {e}")
         await asyncio.sleep(30)
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+online$"))
 @rishabh()
-async def cmd_kce_online(event):
+async def cmd_online(event):
     global HEARTBEAT_TASK
     if not await _is_owner(event):
         return
@@ -2500,7 +1978,7 @@ async def cmd_kce_online(event):
         HEARTBEAT_TASK = asyncio.create_task(_heartbeat_loop())
         await _safe_reply(event, "🚀 Heartbeat started.")
     except Exception as e:
-        await send_log(f"❌ online error: `{e}`")
+        await send_log(f"❌ online err: `{e}`")
 
 
 async def _plugin_bootstrap():
@@ -2509,40 +1987,47 @@ async def _plugin_bootstrap():
         global HEARTBEAT_TASK
         if not HEARTBEAT_TASK or HEARTBEAT_TASK.done():
             HEARTBEAT_TASK = asyncio.create_task(_heartbeat_loop())
+        # memory flusher
         try:
-            await _queue_bot_start()
+            asyncio.create_task(memory_flusher_loop())
+            dbg("memory flusher started")
         except Exception as e:
-            print(f"[aireply] bootstrap bot: {e}")
+            print(f"[aireply] flusher start err: {e}")
+        # daily summary
         try:
-            asyncio.create_task(_queue_bot_supervisor())
+            asyncio.create_task(daily_summary_loop())
+            dbg("daily summary loop started")
         except Exception as e:
-            print(f"[aireply] bootstrap supervisor: {e}")
+            print(f"[aireply] summary start err: {e}")
+        dbg("bootstrap complete")
     except Exception as e:
-        print(f"[aireply] bootstrap: {e}")
+        print(f"[aireply] bootstrap err: {e}")
 
 
 try:
     asyncio.create_task(_plugin_bootstrap())
 except Exception as e:
-    print(f"[aireply] bootstrap init: {e}")
+    print(f"[aireply] bootstrap init err: {e}")
+
+
+print("[aireply] MODULE LOADED SUCCESSFULLY — v3.2 ready")
 
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║  === END OF AIRREPLY v3.0 — STAGE 2 COMPLETE ===             ║
+# ║  === END OF AIRREPLY v3.2 — FULL LEARNING EDITION ===        ║
 # ║                                                              ║
 # ║  Features:                                                   ║
-# ║  • Nigeria WAT timezone everywhere                           ║
-# ║  • Username display in log cards                             ║
 # ║  • Keyword AI replies (whitelisted groups)                   ║
-# ║  • Quiz mode — learns from mods, answers from 3rd, 4:1       ║
-# ║  • Wallet drop detection + instant reply (beast mode)        ║
-# ║  • Wallet config from DM (.kce wallet set)                   ║
-# ║  • Mods config from DM (.kce mods add)                       ║
-# ║  • Group flags: quiz / wallet / reply (from DM with link)    ║
-# ║  • DM blacklist + suspicious DM alerts                       ║
-# ║  • Queue bot sends log cards (feedback buttons work!)        ║
-# ║  • Feedback buttons: 👍 Good  👎 Bad  ✏️ Correct             ║
-# ║  • Queue cards with Allow/Block/Ack/Clear buttons            ║
-# ║  • Auto-online + typing indicator                            ║
-# ║  • Anti-repeat, anti-AI prompt, smart context                ║
+# ║  • Group message learning (60s batches)                      ║
+# ║  • Reading the room (hyped/dead/serious/normal)              ║
+# ║  • Persona accumulation from 👍 feedback                     ║
+# ║  • Aggressive mode toggle                                    ║
+# ║  • Slow mode (typing detection)                              ║
+# ║  • Admin activity awareness                                  ║
+# ║  • Reply `good`/`bad` to log cards                           ║
+# ║  • Daily summary at 23:59 WAT                                ║
+# ║  • Wallet drop (SOL/EVM/SUI)                                 ║
+# ║  • DM blacklist + suspicious alerts                          ║
+# ║  • WAT timezone + beautiful cards                            ║
+# ║  • Natural language commands (DM)                            ║
 # ╚══════════════════════════════════════════════════════════════╝
