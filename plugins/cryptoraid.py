@@ -235,92 +235,127 @@ print("[cryptoraid] MODULE LOADED — chunk 2")
 #  VERIFY — 5 tiers for maximum reliability
 # ═══════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════
+#  VERIFY — 3 tiers: exact msg_id → tweet_id → scan
+# ═══════════════════════════════════════════════════════════════
+
 async def raid_try_verify(target_tweet_id=None, target_msg_id=None):
     try:
         rdbg(f"verify: target tid={target_tweet_id} msg_id={target_msg_id}")
 
-        async def _click_on_msg(msg, label_tier):
-            if not msg:
-                return False
-            rm = getattr(msg, "reply_markup", None)
-            if not rm:
-                buttons = getattr(msg, "buttons", None)
-                if not buttons:
-                    return False
-                for r_idx, row in enumerate(buttons):
-                    for c_idx, btn in enumerate(row):
-                        btxt = (getattr(btn, "text", "") or "").strip()
-                        low = btxt.lower()
-                        if "verify" in low or any(ch in btxt for ch in ("✅", "✓", "✔", "☑")):
-                            try:
-                                await msg.click(r_idx, c_idx)
-                                rdbg(f"verify: {label_tier} msg.click OK on msg {msg.id}")
-                                return True
-                            except Exception as e:
-                                rdbg(f"verify: {label_tier} msg.click failed: {e}")
-                return False
-
-            rows = getattr(rm, "rows", None) or []
-            for r_idx, row in enumerate(rows):
-                btns = getattr(row, "buttons", None) or []
-                for c_idx, btn in enumerate(btns):
-                    text = (getattr(btn, "text", "") or "").strip()
-                    data = getattr(btn, "data", None)
-                    low = text.lower()
-                    if not text or data is None:
-                        continue
-                    if "verify" in low or any(ch in text for ch in ("✅", "✓", "✔", "☑")):
-                        try:
-                            await msg.click(r_idx, c_idx)
-                            rdbg(f"verify: {label_tier} msg.click OK on msg {msg.id}")
-                            return True
-                        except Exception as e:
-                            rdbg(f"verify: {label_tier} msg.click failed: {e}")
-                        try:
-                            await CipherElite(GetBotCallbackAnswerRequest(
-                                peer=RAIDAR_USER_ID,
-                                msg_id=msg.id,
-                                data=data,
-                            ))
-                            rdbg(f"verify: {label_tier} raw callback OK on msg {msg.id}")
-                            return True
-                        except Exception as e2:
-                            rdbg(f"verify: {label_tier} raw callback failed: {e2}")
-            return False
-
+        # TIER 1: exact msg_id
         if target_msg_id:
             try:
                 msg = await CipherElite.get_messages(RAIDAR_USER_ID, ids=target_msg_id)
-                if msg and await _click_on_msg(msg, "TIER1"):
-                    return True
+                if msg:
+                    rm = getattr(msg, "reply_markup", None)
+                    if rm:
+                        rows = getattr(rm, "rows", None) or []
+                        for r_idx, row in enumerate(rows):
+                            btns = getattr(row, "buttons", None) or []
+                            for c_idx, btn in enumerate(btns):
+                                text = (getattr(btn, "text", "") or "").strip()
+                                data = getattr(btn, "data", None)
+                                if not text or data is None:
+                                    continue
+                                low = text.lower()
+                                if "verify" in low or any(ch in text for ch in ("✅", "✓", "✔", "☑")):
+                                    try:
+                                        await msg.click(r_idx, c_idx)
+                                        rdbg(f"verify: TIER1 msg.click OK on msg {msg.id}")
+                                        return True
+                                    except Exception as e:
+                                        rdbg(f"verify: TIER1 msg.click failed: {e}")
+                                    try:
+                                        await CipherElite(GetBotCallbackAnswerRequest(
+                                            peer=RAIDAR_USER_ID,
+                                            msg_id=msg.id,
+                                            data=data,
+                                        ))
+                                        rdbg(f"verify: TIER1 raw callback OK on msg {msg.id}")
+                                        return True
+                                    except Exception as e2:
+                                        rdbg(f"verify: TIER1 raw callback failed: {e2}")
             except Exception as e:
                 rdbg(f"verify: TIER1 err: {e}")
+            rdbg(f"verify: TIER1 failed on msg {target_msg_id} — trying TIER2")
 
-        recent_msgs = []
-        try:
-            recent_msgs = await CipherElite.get_messages(RAIDAR_USER_ID, limit=25) or []
-            if not isinstance(recent_msgs, list):
-                recent_msgs = [recent_msgs]
-        except Exception as e:
-            rdbg(f"verify: fetch recent err: {e}")
-
+        # TIER 2: tweet_id match
         if target_tweet_id:
-            for msg in recent_msgs:
-                try:
+            try:
+                messages = await CipherElite.get_messages(RAIDAR_USER_ID, limit=25)
+                for msg in messages:
                     mlink = raid_extract_link_from_msg(msg)
                     mtid = raid_tweet_id(mlink) if mlink else None
-                    if mtid and str(mtid) == str(target_tweet_id):
-                        if await _click_on_msg(msg, "TIER2"):
-                            return True
-                except Exception as e:
-                    rdbg(f"verify: TIER2 iter err: {e}")
-
-        for msg in recent_msgs:
-            try:
-                if await _click_on_msg(msg, "TIER3"):
-                    return True
+                    if not mtid or str(mtid) != str(target_tweet_id):
+                        continue
+                    rm = getattr(msg, "reply_markup", None)
+                    if not rm:
+                        continue
+                    rows = getattr(rm, "rows", None) or []
+                    for r_idx, row in enumerate(rows):
+                        btns = getattr(row, "buttons", None) or []
+                        for c_idx, btn in enumerate(btns):
+                            text = (getattr(btn, "text", "") or "").strip()
+                            data = getattr(btn, "data", None)
+                            if not text or data is None:
+                                continue
+                            low = text.lower()
+                            if "verify" in low or any(ch in text for ch in ("✅", "✓", "✔", "☑")):
+                                try:
+                                    await msg.click(r_idx, c_idx)
+                                    rdbg(f"verify: TIER2 msg.click OK on msg {msg.id}")
+                                    return True
+                                except Exception as e:
+                                    rdbg(f"verify: TIER2 msg.click failed: {e}")
+                                try:
+                                    await CipherElite(GetBotCallbackAnswerRequest(
+                                        peer=RAIDAR_USER_ID,
+                                        msg_id=msg.id,
+                                        data=data,
+                                    ))
+                                    rdbg(f"verify: TIER2 raw callback OK on msg {msg.id}")
+                                    return True
+                                except Exception as e2:
+                                    rdbg(f"verify: TIER2 raw callback failed: {e2}")
             except Exception as e:
-                rdbg(f"verify: TIER3 iter err: {e}")
+                rdbg(f"verify: TIER2 err: {e}")
+
+        # TIER 3: scan latest 25 DMs
+        try:
+            messages = await CipherElite.get_messages(RAIDAR_USER_ID, limit=25)
+            for msg in messages:
+                rm = getattr(msg, "reply_markup", None)
+                if not rm:
+                    continue
+                rows = getattr(rm, "rows", None) or []
+                for r_idx, row in enumerate(rows):
+                    btns = getattr(row, "buttons", None) or []
+                    for c_idx, btn in enumerate(btns):
+                        text = (getattr(btn, "text", "") or "").strip()
+                        data = getattr(btn, "data", None)
+                        if not text or data is None:
+                            continue
+                        low = text.lower()
+                        if "verify" in low or any(ch in text for ch in ("✅", "✓", "✔", "☑")):
+                            try:
+                                await msg.click(r_idx, c_idx)
+                                rdbg(f"verify: TIER3 msg.click OK on msg {msg.id}")
+                                return True
+                            except Exception as e:
+                                rdbg(f"verify: TIER3 msg.click failed: {e}")
+                            try:
+                                await CipherElite(GetBotCallbackAnswerRequest(
+                                    peer=RAIDAR_USER_ID,
+                                    msg_id=msg.id,
+                                    data=data,
+                                ))
+                                rdbg(f"verify: TIER3 raw callback OK on msg {msg.id}")
+                                return True
+                            except Exception as e2:
+                                rdbg(f"verify: TIER3 raw callback failed: {e2}")
+        except Exception as e:
+            rdbg(f"verify: TIER3 err: {e}")
 
         rdbg("verify: ALL tiers failed")
         return False
@@ -331,54 +366,43 @@ async def raid_try_verify(target_tweet_id=None, target_msg_id=None):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  XP CATCHER — poll SPECIFIC target msg first, then scan
+#  XP CATCHER — the version that worked
 # ═══════════════════════════════════════════════════════════════
 
-async def raid_poll_dm2(poll_tweet_id, timeout_sec, target_msg_id=None):
-    """Poll the SPECIFIC Raidar DM we clicked verify on for XP text.
-    Falls back to scanning recent DMs if target doesn't update."""
+async def raid_poll_dm2(poll_tweet_id, timeout_sec):
+    """Poll Raidar DMs for XP confirmation — force re-fetch by ID to bypass cache."""
     tries = timeout_sec * 2
-    rdbg(f"xp-catcher: polling target_msg={target_msg_id} tid={poll_tweet_id}")
 
-    # ── Primary: poll the exact message we clicked verify on
-    if target_msg_id:
-        for _ in range(tries):
-            await asyncio.sleep(0.5)
-            try:
-                fresh = await CipherElite.get_messages(RAIDAR_USER_ID, ids=target_msg_id)
-                if fresh:
-                    mtext = (fresh.raw_text or "").lower()
-                    rdbg(f"xp-catcher: target {target_msg_id} text='{mtext[:100]}'")
-                    if ("verified" in mtext
-                        or "received 3 xp" in mtext
-                        or "+3 xp" in mtext
-                        or "reply verified" in mtext):
-                        rdbg(f"xp-catcher: HIT on target msg {target_msg_id}")
-                        return True
-            except Exception as e:
-                rdbg(f"xp-catcher: target poll err: {e}")
+    try:
+        recent = await CipherElite.get_messages(RAIDAR_USER_ID, limit=15)
+        msg_ids = [m.id for m in recent]
+        rdbg(f"poll: tracking {len(msg_ids)} msg ids")
+    except Exception as e:
+        rdbg(f"poll initial fetch err: {e}")
+        return False
 
-    # ── Fallback: scan recent DMs (no tid match — XP msgs lack tid)
-    rdbg("xp-catcher: target poll exhausted, scanning recent")
     for _ in range(tries):
         await asyncio.sleep(0.5)
         try:
-            recent = await CipherElite.get_messages(RAIDAR_USER_ID, limit=15) or []
-            if not isinstance(recent, list):
-                recent = [recent]
-            for m in recent:
+            fresh_msgs = await CipherElite.get_messages(RAIDAR_USER_ID, ids=msg_ids)
+            if not fresh_msgs:
+                continue
+            if not isinstance(fresh_msgs, list):
+                fresh_msgs = [fresh_msgs]
+            for m in fresh_msgs:
                 if not m:
                     continue
-                mtext = (m.raw_text or "").lower()
-                if ("reply verified" in mtext
-                    or "received 3 xp" in mtext
-                    or "+3 xp" in mtext):
-                    rdbg(f"xp-catcher: HIT on scan msg {m.id}")
-                    return True
+                mtext = m.raw_text or ""
+                if ("Reply verified" in mtext
+                    or "Received 3 XP" in mtext
+                    or "+3 XP" in mtext):
+                    mlink = raid_extract_link_from_msg(m)
+                    mtid = raid_tweet_id(mlink) if mlink else None
+                    if not poll_tweet_id or not mtid or str(mtid) == str(poll_tweet_id):
+                        rdbg(f"DM#2 polled on msg {m.id} tid={mtid}")
+                        return True
         except Exception as e:
-            rdbg(f"xp-catcher: scan err: {e}")
-
-    rdbg("xp-catcher: no XP found")
+            rdbg(f"poll err: {e}")
     return False
 
 
@@ -398,6 +422,7 @@ async def raid_edit_log(msg_id, text):
 
 print("[cryptoraid] MODULE LOADED — chunk 3")
 
+# ═══ END OF CHUNK 3 ═══
 # ═══ END OF CHUNK 3 ═══
 
 
