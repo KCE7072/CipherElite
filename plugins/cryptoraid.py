@@ -231,6 +231,9 @@ print("[cryptoraid] MODULE LOADED — chunk 2")
 #  tier 4: any Verify button on newest DM
 #  tier 5: raw reply_markup scan
 # ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+#  VERIFY — 5 tiers for maximum reliability
+# ═══════════════════════════════════════════════════════════════
 
 async def raid_try_verify(target_tweet_id=None, target_msg_id=None):
     try:
@@ -241,7 +244,6 @@ async def raid_try_verify(target_tweet_id=None, target_msg_id=None):
                 return False
             rm = getattr(msg, "reply_markup", None)
             if not rm:
-                # try .buttons fallback
                 buttons = getattr(msg, "buttons", None)
                 if not buttons:
                     return False
@@ -286,7 +288,6 @@ async def raid_try_verify(target_tweet_id=None, target_msg_id=None):
                             rdbg(f"verify: {label_tier} raw callback failed: {e2}")
             return False
 
-        # TIER 1: exact msg_id
         if target_msg_id:
             try:
                 msg = await CipherElite.get_messages(RAIDAR_USER_ID, ids=target_msg_id)
@@ -295,7 +296,6 @@ async def raid_try_verify(target_tweet_id=None, target_msg_id=None):
             except Exception as e:
                 rdbg(f"verify: TIER1 err: {e}")
 
-        # Fetch recent messages ONCE for tiers 2-4
         recent_msgs = []
         try:
             recent_msgs = await CipherElite.get_messages(RAIDAR_USER_ID, limit=25) or []
@@ -304,7 +304,6 @@ async def raid_try_verify(target_tweet_id=None, target_msg_id=None):
         except Exception as e:
             rdbg(f"verify: fetch recent err: {e}")
 
-        # TIER 2: scan recent DMs first, match tweet_id
         if target_tweet_id:
             for msg in recent_msgs:
                 try:
@@ -316,7 +315,6 @@ async def raid_try_verify(target_tweet_id=None, target_msg_id=None):
                 except Exception as e:
                     rdbg(f"verify: TIER2 iter err: {e}")
 
-        # TIER 3: any recent DM that has a Verify button
         for msg in recent_msgs:
             try:
                 if await _click_on_msg(msg, "TIER3"):
@@ -333,56 +331,54 @@ async def raid_try_verify(target_tweet_id=None, target_msg_id=None):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  XP CATCHER — poll DM list AND the specific target msg
+#  XP CATCHER — poll SPECIFIC target msg first, then scan
 # ═══════════════════════════════════════════════════════════════
 
 async def raid_poll_dm2(poll_tweet_id, timeout_sec, target_msg_id=None):
-    """Poll Raidar DMs for XP confirmation.
-    Force re-fetch by ID to bypass cache.
-    Also scans the specific msg we clicked verify on."""
+    """Poll the SPECIFIC Raidar DM we clicked verify on for XP text.
+    Falls back to scanning recent DMs if target doesn't update."""
     tries = timeout_sec * 2
-    rdbg(f"xp-catcher: polling for tid={poll_tweet_id} target_msg_id={target_msg_id}")
+    rdbg(f"xp-catcher: polling target_msg={target_msg_id} tid={poll_tweet_id}")
 
-    # build list of msg ids to check
-    msg_ids = []
-    try:
-        recent = await CipherElite.get_messages(RAIDAR_USER_ID, limit=15) or []
-        if not isinstance(recent, list):
-            recent = [recent]
-        msg_ids = [m.id for m in recent if m]
-    except Exception as e:
-        rdbg(f"xp-catcher: initial fetch err: {e}")
+    # ── Primary: poll the exact message we clicked verify on
+    if target_msg_id:
+        for _ in range(tries):
+            await asyncio.sleep(0.5)
+            try:
+                fresh = await CipherElite.get_messages(RAIDAR_USER_ID, ids=target_msg_id)
+                if fresh:
+                    mtext = (fresh.raw_text or "").lower()
+                    rdbg(f"xp-catcher: target {target_msg_id} text='{mtext[:100]}'")
+                    if ("verified" in mtext
+                        or "received 3 xp" in mtext
+                        or "+3 xp" in mtext
+                        or "reply verified" in mtext):
+                        rdbg(f"xp-catcher: HIT on target msg {target_msg_id}")
+                        return True
+            except Exception as e:
+                rdbg(f"xp-catcher: target poll err: {e}")
 
-    if target_msg_id and target_msg_id not in msg_ids:
-        msg_ids.insert(0, target_msg_id)
-
-    rdbg(f"xp-catcher: tracking {len(msg_ids)} msgs")
-
+    # ── Fallback: scan recent DMs (no tid match — XP msgs lack tid)
+    rdbg("xp-catcher: target poll exhausted, scanning recent")
     for _ in range(tries):
         await asyncio.sleep(0.5)
         try:
-            fresh_msgs = await CipherElite.get_messages(RAIDAR_USER_ID, ids=msg_ids)
-            if not fresh_msgs:
-                continue
-            if not isinstance(fresh_msgs, list):
-                fresh_msgs = [fresh_msgs]
-            for m in fresh_msgs:
+            recent = await CipherElite.get_messages(RAIDAR_USER_ID, limit=15) or []
+            if not isinstance(recent, list):
+                recent = [recent]
+            for m in recent:
                 if not m:
                     continue
                 mtext = (m.raw_text or "").lower()
                 if ("reply verified" in mtext
                     or "received 3 xp" in mtext
-                    or "+3 xp" in mtext
-                    or "xp" in mtext and "verified" in mtext):
-                    mlink = raid_extract_link_from_msg(m)
-                    mtid = raid_tweet_id(mlink) if mlink else None
-                    if not poll_tweet_id or not mtid or str(mtid) == str(poll_tweet_id):
-                        rdbg(f"xp-catcher: HIT on msg {m.id} tid={mtid}")
-                        return True
-                    else:
-                        rdbg(f"xp-catcher: tid mismatch on msg {m.id}: {mtid} vs {poll_tweet_id}")
+                    or "+3 xp" in mtext):
+                    rdbg(f"xp-catcher: HIT on scan msg {m.id}")
+                    return True
         except Exception as e:
-            rdbg(f"xp-catcher poll err: {e}")
+            rdbg(f"xp-catcher: scan err: {e}")
+
+    rdbg("xp-catcher: no XP found")
     return False
 
 
@@ -401,6 +397,9 @@ async def raid_edit_log(msg_id, text):
         print(f"[cryptoraid] edit err: {e}")
 
 print("[cryptoraid] MODULE LOADED — chunk 3")
+
+# ═══ END OF CHUNK 3 ═══
+
 
 # ═══ END OF CHUNK 3 ═══
 # ═══════════════════════════════════════════════════════════════
