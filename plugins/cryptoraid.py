@@ -1191,7 +1191,7 @@ if chat_name == "Unknown" or not chat_id:
     rdbg(f"skipping raid from Unknown chat (chat_id={chat_id})")
     return
     
-        for url in new_urls:
+for url in new_urls:
             smashed[url] = {
                 "date": stamp["date"], "time": stamp["time"],
                 "time12": stamp["time12"], "ts": stamp["ts"],
