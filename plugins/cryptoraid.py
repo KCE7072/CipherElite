@@ -40,7 +40,7 @@ OTHER_TARGETS = ['🤛', '✊', '🤜', 'Verify', 'Verified', '✅', 'Confirmed'
 VERIFY_WAIT_AFTER_DONE = 10
 DM2_WAIT_SECONDS = 25
 MANUAL_DONE_TIMEOUT = 900
-RECENCY_MATCH_WINDOW = 60
+RECENCY_MATCH_WINDOW = 180
 DEBUG = True
 
 def rdbg(msg):
@@ -816,6 +816,8 @@ async def cmd_reset(event):
     RAID_DB["completed"] = []
     RAID_DB["failed"] = []
     RAID_DB["processed_tweet_ids"] = []
+    RAID_DB["smashed"] = {}
+    RAID_DB["smashed_tids"] = []
     raid_save_db(RAID_DB)
     await event.reply("🔄 Reset.")
 
