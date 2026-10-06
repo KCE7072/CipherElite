@@ -225,7 +225,7 @@ print("[cryptoraid] MODULE LOADED — chunk 1B")
 # ═══════════════════════════════════════════════════════════════
 #  VERIFY — tweet-ID matched, raw reply_markup parsing
 # ═══════════════════════════════════════════════════════════════
- async def raid_try_verify(raid_tweet_id=None, raidar_msg_id=None):
+async def raid_try_verify(raid_tweet_id=None, raidar_msg_id=None):
     """
     Click Verify on the Raidar DM whose tweet link matches raid_tweet_id.
     Falls back to stored msg_id, then most recent Verify button.
