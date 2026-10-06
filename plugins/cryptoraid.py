@@ -1455,6 +1455,10 @@ print("[cryptoraid] MODULE LOADED — chunk 5B")
 #  PROCESS QUEUE
 # ═══════════════════════════════════════════════════════════════
 
+# ═══════════════════════════════════════════════════════════════
+#  PROCESS QUEUE
+# ═══════════════════════════════════════════════════════════════
+
 async def raid_process_queue():
     if PROCESSING["active"]:
         return
@@ -1619,7 +1623,10 @@ async def raid_process_queue():
                         raid_build_card(raid_id, chat_name, f"https://{link}", raid["steps"], "processing")
                     )
 
+                # ─── DM #2 detection — 3 tiers
                 dm2_seen = False
+
+                # Tier A: event-based flag
                 for _ in range(DM2_WAIT_SECONDS * 2):
                     await asyncio.sleep(0.5)
                     cur = RAID_DB.get("current_raid")
@@ -1627,8 +1634,30 @@ async def raid_process_queue():
                         dm2_seen = True
                         break
 
+                # Tier B: poll the exact target msg we clicked verify on
                 if not dm2_seen:
-                    rdbg("polling Raidar DMs for DM#2...")
+                    target_mid = raid.get("raidar_dm_msg_id")
+                    if target_mid:
+                        rdbg(f"polling target msg {target_mid} for XP confirmation...")
+                        for _ in range(DM2_WAIT_SECONDS * 2):
+                            await asyncio.sleep(0.5)
+                            try:
+                                fresh = await CipherElite.get_messages(RAIDAR_USER_ID, ids=target_mid)
+                                if fresh:
+                                    mtext = fresh.raw_text or ""
+                                    rdbg(f"  target msg text: '{mtext[:80]}'")
+                                    if ("Reply verified" in mtext
+                                        or "Received 3 XP" in mtext
+                                        or "+3 XP" in mtext):
+                                        dm2_seen = True
+                                        rdbg(f"DM#2 CONFIRMED on target msg {target_mid}")
+                                        break
+                            except Exception as e:
+                                rdbg(f"  target poll err: {e}")
+
+                # Tier C: poll list of recent DMs (cache-busting)
+                if not dm2_seen:
+                    rdbg("polling Raidar DMs list for DM#2...")
                     dm2_seen = await raid_poll_dm2(tweet_id, DM2_WAIT_SECONDS)
 
                 if not dm2_seen:
@@ -1728,11 +1757,28 @@ async def raid_process_queue():
 #  BOOTSTRAP
 # ═══════════════════════════════════════════════════════════════
 
+async def raid_cleanup_stale():
+    """Remove awaiting_dm entries older than 5 min."""
+    while True:
+        try:
+            await asyncio.sleep(120)
+            awaiting = RAID_DB.get("awaiting_dm", [])
+            now_ts = raid_now().timestamp()
+            filtered = [r for r in awaiting if now_ts - r.get("ts", 0) < 300]
+            if len(filtered) != len(awaiting):
+                rdbg(f"cleanup: removed {len(awaiting) - len(filtered)} stale awaiting")
+                RAID_DB["awaiting_dm"] = filtered
+                raid_save_db(RAID_DB)
+        except Exception as e:
+            print(f"[cryptoraid] cleanup err: {e}")
+
+
 async def raid_bootstrap():
     try:
         await asyncio.sleep(12)
         await raid_start_bot()
-        rdbg("bootstrap complete")
+        asyncio.create_task(raid_cleanup_stale())
+        rdbg("bootstrap complete (cleanup started)")
     except Exception as e:
         print(f"[cryptoraid] bootstrap err: {e}")
 
@@ -1742,7 +1788,6 @@ try:
 except Exception as e:
     print(f"[cryptoraid] bootstrap init err: {e}")
 
-print("[cryptoraid] MODULE LOADED SUCCESSFULLY — v7.5 ready")
+print("[cryptoraid] MODULE LOADED SUCCESSFULLY — v7.6 ready")
 
 # ═══ END OF CHUNK 5C ═══
-
