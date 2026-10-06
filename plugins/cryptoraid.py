@@ -238,6 +238,9 @@ print("[cryptoraid] MODULE LOADED — chunk 2")
 # ═══════════════════════════════════════════════════════════════
 #  VERIFY — 3 tiers: exact msg_id → tweet_id → scan
 # ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+#  VERIFY — 3 tiers: exact msg_id → tweet_id → scan
+# ═══════════════════════════════════════════════════════════════
 
 async def raid_try_verify(target_tweet_id=None, target_msg_id=None):
     try:
@@ -366,43 +369,39 @@ async def raid_try_verify(target_tweet_id=None, target_msg_id=None):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  XP CATCHER — the version that worked
+#  XP CATCHER — fresh-fetch to bypass Telethon cache
 # ═══════════════════════════════════════════════════════════════
 
 async def raid_poll_dm2(poll_tweet_id, timeout_sec):
-    """Poll Raidar DMs for XP confirmation — force re-fetch by ID to bypass cache."""
+    """Poll Raidar for XP — uses fresh dialog fetch (no ids=) to bypass cache."""
     tries = timeout_sec * 2
+    rdbg(f"xp-catcher: start tid={poll_tweet_id}")
 
-    try:
-        recent = await CipherElite.get_messages(RAIDAR_USER_ID, limit=15)
-        msg_ids = [m.id for m in recent]
-        rdbg(f"poll: tracking {len(msg_ids)} msg ids")
-    except Exception as e:
-        rdbg(f"poll initial fetch err: {e}")
-        return False
-
-    for _ in range(tries):
+    for attempt in range(tries):
         await asyncio.sleep(0.5)
         try:
-            fresh_msgs = await CipherElite.get_messages(RAIDAR_USER_ID, ids=msg_ids)
-            if not fresh_msgs:
+            fresh = await CipherElite.get_messages(RAIDAR_USER_ID, limit=20)
+            if not fresh:
                 continue
-            if not isinstance(fresh_msgs, list):
-                fresh_msgs = [fresh_msgs]
-            for m in fresh_msgs:
+            if not isinstance(fresh, list):
+                fresh = [fresh]
+
+            for m in fresh:
                 if not m:
                     continue
-                mtext = m.raw_text or ""
-                if ("Reply verified" in mtext
-                    or "Received 3 XP" in mtext
-                    or "+3 XP" in mtext):
-                    mlink = raid_extract_link_from_msg(m)
-                    mtid = raid_tweet_id(mlink) if mlink else None
-                    if not poll_tweet_id or not mtid or str(mtid) == str(poll_tweet_id):
-                        rdbg(f"DM#2 polled on msg {m.id} tid={mtid}")
-                        return True
+                mtext = (m.raw_text or "").lower()
+                if attempt == 0:
+                    rdbg(f"xp-catcher: msg {m.id}='{mtext[:60]}'")
+                if ("reply verified" in mtext
+                    or "received 3 xp" in mtext
+                    or "+3 xp" in mtext
+                    or ("verified" in mtext and "xp" in mtext)):
+                    rdbg(f"xp-catcher: HIT msg {m.id}='{mtext[:80]}'")
+                    return True
         except Exception as e:
-            rdbg(f"poll err: {e}")
+            rdbg(f"xp-catcher err: {e}")
+
+    rdbg("xp-catcher: no XP found")
     return False
 
 
@@ -422,6 +421,7 @@ async def raid_edit_log(msg_id, text):
 
 print("[cryptoraid] MODULE LOADED — chunk 3")
 
+# ═══ END OF CHUNK 3 ═══
 # ═══ END OF CHUNK 3 ═══
 # ═══ END OF CHUNK 3 ═══
 
@@ -1321,6 +1321,9 @@ print("[cryptoraid] MODULE LOADED — chunk 6A")
 # ═══════════════════════════════════════════════════════════════
 #  RAIDAR DM WATCHER
 # ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+#  RAIDAR DM WATCHER
+# ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage(from_users=RAIDAR_USER_ID))
 async def raidar_watcher(event):
@@ -1333,27 +1336,23 @@ async def raidar_watcher(event):
         rdbg(f"raidar DM: link={dm_link} tid={dm_tweet_id} msg_id={event.message.id}")
         rdbg(f"raidar DM RAW text[0:200]='{text[:200]}'")
 
+        # ── DM #1 (smash confirmed OR raid ended OR raid tweet)
         if ("How to earn reply XP" in text
             or "Raid Tweet" in text
             or "Raid Ended" in text
             or "Targets Reached" in text):
 
+            # only skip if THIS EXACT tweet was already fully processed
             processed = RAID_DB.get("processed_tweet_ids", [])
             if dm_tweet_id and dm_tweet_id in processed:
-                rdbg(f"DM#1 for already-processed tid={dm_tweet_id} — skipping")
+                rdbg(f"DM#1 already-processed tid={dm_tweet_id} — skipping")
                 return
-
-            cur = RAID_DB.get("current_raid")
-            if cur and cur.get("status") == "active":
-                cur_tid = cur.get("tweet_id")
-                if dm_tweet_id and cur_tid and dm_tweet_id == cur_tid:
-                    rdbg(f"DM#1 dup for same active raid {cur['raid_id']} — skipping")
-                    return
 
             awaiting = RAID_DB.get("awaiting_dm", [])
             match_idx = None
             match_reason = None
 
+            # priority 1: exact tweet_id in awaiting
             if dm_tweet_id:
                 for i, r in enumerate(awaiting):
                     if r.get("tweet_id") == dm_tweet_id:
@@ -1361,6 +1360,7 @@ async def raidar_watcher(event):
                         match_reason = f"tweet_id={dm_tweet_id}"
                         break
 
+            # priority 2: recency fallback
             if match_idx is None and awaiting:
                 now_ts = raid_now().timestamp()
                 for i in range(len(awaiting) - 1, -1, -1):
@@ -1379,6 +1379,7 @@ async def raidar_watcher(event):
             RAID_DB["awaiting_dm"] = awaiting
             rdbg(f"DM#1 matched raid {raid['raid_id']} by {match_reason}")
 
+            # if a DIFFERENT raid is currently active, requeue this one and wait
             cur = RAID_DB.get("current_raid")
             if cur and cur.get("status") == "active" and cur.get("raid_id") != raid["raid_id"]:
                 rdbg(f"raid {cur['raid_id']} still active — requeueing {raid['raid_id']}")
@@ -1417,14 +1418,14 @@ async def raidar_watcher(event):
                 asyncio.create_task(raid_process_queue())
             return
 
-        if "Reply verified" in text or "Received 3 XP" in text or "+3 XP" in text:
+        # ── DM #2 (XP confirmed via event)
+        if ("Reply verified" in text
+            or "Received 3 XP" in text
+            or "+3 XP" in text
+            or ("verified" in text.lower() and "xp" in text.lower())):
             cur = RAID_DB.get("current_raid")
             if not cur:
                 rdbg("DM#2: no active raid")
-                return
-            cur_tid = cur.get("tweet_id")
-            if dm_tweet_id and cur_tid and dm_tweet_id != cur_tid:
-                rdbg(f"DM#2 tid mismatch ({dm_tweet_id} != {cur_tid})")
                 return
             if not cur.get("manual_done"):
                 rdbg("DM#2 before Done tap — ignoring")
@@ -1433,7 +1434,7 @@ async def raidar_watcher(event):
             cur["dm2_received"] = True
             cur["dm2_time"] = stamp["time12"]
             cur["steps"].append(
-                f"9️⃣ 🎉 RAIDAR DM #2 — XP CONFIRMED ✅\n"
+                f"9️⃣ 🎉 XP CONFIRMED (event) ✅\n"
                 f"   ▸ \"{text[:80]}\"\n"
                 f"   ▸ Time: {stamp['time12']}"
             )
@@ -1464,9 +1465,15 @@ async def raidar_watcher(event):
                 "time12": stamp["time12"], "status": "done",
             })
             RAID_DB["completed"] = completed[-100:]
+
+            processed = RAID_DB.get("processed_tweet_ids", [])
+            if cur.get("tweet_id"):
+                processed.append(cur["tweet_id"])
+            RAID_DB["processed_tweet_ids"] = processed[-200:]
+
             RAID_DB["current_raid"] = None
             raid_save_db(RAID_DB)
-            rdbg(f"raid {cur['raid_id']} WON (via event)")
+            rdbg(f"raid {cur['raid_id']} WON via event")
             return
 
         rdbg(f"raidar DM unhandled: {text[:80]}")
@@ -1474,6 +1481,8 @@ async def raidar_watcher(event):
         print(f"[cryptoraid] raidar watcher err: {e}")
 
 print("[cryptoraid] MODULE LOADED — chunk 6B")
+
+# ═══ END OF CHUNK 6B ═══
 
 # ═══ END OF CHUNK 6B ═══
 # ═══════════════════════════════════════════════════════════════
