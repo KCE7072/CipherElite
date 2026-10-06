@@ -109,6 +109,9 @@ print("[cryptoraid] MODULE LOADED — chunk 1")
 # ═══════════════════════════════════════════════════════════════
 #  HELPERS
 # ═══════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+#  HELPERS
+# ═══════════════════════════════════════════════════════════════
 
 def raid_norm_url(url):
     url = re.sub(r'\?.*$', '', url)
@@ -220,7 +223,7 @@ async def raid_fetch_tweet(url):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  VERIFY — tiers: exact msg_id → tweet_id match → scan latest
+#  VERIFY — 3 tiers: exact msg_id → tweet_id → scan
 # ═══════════════════════════════════════════════════════════════
 
 async def raid_try_verify(target_tweet_id=None, target_msg_id=None):
@@ -306,7 +309,7 @@ async def raid_try_verify(target_tweet_id=None, target_msg_id=None):
             except Exception as e:
                 rdbg(f"verify: TIER2 err: {e}")
 
-        # TIER 3: scan latest 25 DMs — click FIRST verify button (fallback)
+        # TIER 3: scan latest 25 DMs — click FIRST verify button
         try:
             messages = await CipherElite.get_messages(RAIDAR_USER_ID, limit=25)
             for msg in messages:
@@ -350,16 +353,37 @@ async def raid_try_verify(target_tweet_id=None, target_msg_id=None):
         return False
 
 
+# ═══════════════════════════════════════════════════════════════
+#  POLL DM2 — cache-busting (force fresh fetch by ID)
+# ═══════════════════════════════════════════════════════════════
+
 async def raid_poll_dm2(poll_tweet_id, timeout_sec):
-    """Poll Raidar DMs for XP confirmation text."""
+    """Poll Raidar DMs for XP confirmation — force re-fetch by ID to bypass cache."""
     tries = timeout_sec * 2
+
+    try:
+        recent = await CipherElite.get_messages(RAIDAR_USER_ID, limit=15)
+        msg_ids = [m.id for m in recent]
+        rdbg(f"poll: tracking {len(msg_ids)} msg ids")
+    except Exception as e:
+        rdbg(f"poll initial fetch err: {e}")
+        return False
+
     for _ in range(tries):
         await asyncio.sleep(0.5)
         try:
-            recent = await CipherElite.get_messages(RAIDAR_USER_ID, limit=15)
-            for m in recent:
+            fresh_msgs = await CipherElite.get_messages(RAIDAR_USER_ID, ids=msg_ids)
+            if not fresh_msgs:
+                continue
+            if not isinstance(fresh_msgs, list):
+                fresh_msgs = [fresh_msgs]
+            for m in fresh_msgs:
+                if not m:
+                    continue
                 mtext = m.raw_text or ""
-                if "Reply verified" in mtext or "Received 3 XP" in mtext or "+3 XP" in mtext:
+                if ("Reply verified" in mtext
+                    or "Received 3 XP" in mtext
+                    or "+3 XP" in mtext):
                     mlink = raid_extract_link_from_msg(m)
                     mtid = raid_tweet_id(mlink) if mlink else None
                     if not poll_tweet_id or not mtid or str(mtid) == str(poll_tweet_id):
@@ -385,6 +409,8 @@ async def raid_edit_log(msg_id, text):
         print(f"[cryptoraid] edit err: {e}")
 
 print("[cryptoraid] MODULE LOADED — chunk 2")
+
+# ═══ END OF CHUNK 2 ═══
 
 # ═══ END OF CHUNK 2 ═══
 # ═══════════════════════════════════════════════════════════════
