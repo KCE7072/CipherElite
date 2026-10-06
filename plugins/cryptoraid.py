@@ -1244,6 +1244,9 @@ print("[cryptoraid] MODULE LOADED — chunk 3A")
 # ═══ END OF CHUNK 3A ═══
 # ═══════════════════════════════════════════════════════════════
 #  RAIDAR DM WATCHER
+# ═══════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
+#  RAIDAR DM WATCHER — caches verify target from ANY raidar DM
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage(from_users=RAIDAR_USER_ID))
@@ -1254,15 +1257,73 @@ async def raidar_watcher(event):
 
         dm_link = raid_extract_link_from_msg(event.message)
         dm_tweet_id = raid_tweet_id(dm_link) if dm_link else None
-        rdbg(f"raidar DM: link={dm_link} tid={dm_tweet_id}")
+        rdbg(f"raidar DM: link={dm_link} tid={dm_tweet_id} msg_id={event.message.id}")
+        rdbg(f"raidar DM RAW text[0:200]='{text[:200]}'")
 
-        # ── DM #1 (smash confirmed)
-        if "How to earn reply XP" in text or "Raid Tweet" in text:
+        # ── CACHE VERIFY TARGET from ANY raidar DM that has a Verify button
+        try:
+            has_verify = False
+            if event.buttons:
+                for row in event.buttons:
+                    for btn in row:
+                        btxt = (getattr(btn, "text", "") or "").lower()
+                        if "verify" in btxt:
+                            has_verify = True
+                            break
+                    if has_verify:
+                        break
+
+            if has_verify:
+                awaiting = RAID_DB.get("awaiting_dm", [])
+                now_ts = raid_now().timestamp()
+                matched = False
+
+                # try tweet_id match first
+                if dm_tweet_id:
+                    for i, r in enumerate(awaiting):
+                        if r.get("tweet_id") == dm_tweet_id:
+                            r["raidar_dm_msg_id"] = event.message.id
+                            r["raidar_dm_time"] = stamp["time12"]
+                            RAID_DB["awaiting_dm"] = awaiting
+                            raid_save_db(RAID_DB)
+                            rdbg(f"CACHED verify msg_id={event.message.id} for raid {r['raid_id']} via tid")
+                            matched = True
+                            break
+
+                # fallback: recency
+                if not matched and awaiting:
+                    for i in range(len(awaiting) - 1, -1, -1):
+                        r = awaiting[i]
+                        age = now_ts - r.get("ts", 0)
+                        if age < RECENCY_MATCH_WINDOW:
+                            r["raidar_dm_msg_id"] = event.message.id
+                            r["raidar_dm_time"] = stamp["time12"]
+                            RAID_DB["awaiting_dm"] = awaiting
+                            raid_save_db(RAID_DB)
+                            rdbg(f"CACHED verify msg_id={event.message.id} for raid {r['raid_id']} via recency (age={int(age)}s)")
+                            matched = True
+                            break
+
+                # also update current_raid if active
+                cur = RAID_DB.get("current_raid")
+                if cur and not cur.get("raidar_dm_msg_id"):
+                    cur["raidar_dm_msg_id"] = event.message.id
+                    RAID_DB["current_raid"] = cur
+                    raid_save_db(RAID_DB)
+                    rdbg(f"CACHED verify msg_id={event.message.id} for current_raid {cur['raid_id']}")
+        except Exception as e:
+            rdbg(f"cache verify target err: {e}")
+
+        # ── DM #1 (smash confirmed) — also accept "Raid Ended"
+        if ("How to earn reply XP" in text
+            or "Raid Tweet" in text
+            or "Raid Ended" in text
+            or "Targets Reached" in text):
+
             awaiting = RAID_DB.get("awaiting_dm", [])
             match_idx = None
             match_reason = None
 
-            # priority 1: exact tweet ID match
             if dm_tweet_id:
                 for i, r in enumerate(awaiting):
                     if r.get("tweet_id") == dm_tweet_id:
@@ -1270,7 +1331,6 @@ async def raidar_watcher(event):
                         match_reason = f"tweet_id={dm_tweet_id}"
                         break
 
-            # priority 2: recency fallback
             if match_idx is None and awaiting:
                 now_ts = raid_now().timestamp()
                 for i in range(len(awaiting) - 1, -1, -1):
@@ -1291,12 +1351,13 @@ async def raidar_watcher(event):
 
             raid["dm1_received"] = True
             raid["dm1_time"] = stamp["time12"]
-            raid["raidar_dm_msg_id"] = event.message.id
+            if not raid.get("raidar_dm_msg_id"):
+                raid["raidar_dm_msg_id"] = event.message.id
             raid["status"] = "active"
             raid["steps"].append(
                 f"4️⃣ 📩 RAIDAR DM #1 ✅\n"
                 f"   ▸ Matched: {match_reason}\n"
-                f"   ▸ Raidar msg_id: {event.message.id}\n"
+                f"   ▸ Raidar msg_id: {raid['raidar_dm_msg_id']}\n"
                 f"   ▸ Time: {stamp['time12']}"
             )
 
@@ -1367,11 +1428,13 @@ async def raidar_watcher(event):
             rdbg(f"raid {cur['raid_id']} WON")
             return
 
-        rdbg(f"raidar DM unknown: {text[:80]}")
+        rdbg(f"raidar DM unhandled: {text[:80]}")
     except Exception as e:
         print(f"[cryptoraid] raidar watcher err: {e}")
 
 print("[cryptoraid] MODULE LOADED — chunk 3B")
+
+# ═══ END OF CHUNK 3B ═══
 
 # ═══ END OF CHUNK 3B ═══
 # ═══════════════════════════════════════════════════════════════
