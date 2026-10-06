@@ -1,4 +1,4 @@
-# =============================================================================
+i# =============================================================================
 #  CipherElite Plugin - cryptoraid v7.5
 # =============================================================================
 
@@ -1181,16 +1181,9 @@ async def raid_detector(event):
             print(f"[cryptoraid] click err: {e}")
             return
 
-chat = await event.get_chat()
-chat_name = getattr(chat, "title", "Unknown")
-chat_id = event.chat_id
-stamp = raid_now_dict()
+chat = await event.get_chat(); chat_name = getattr(chat, "title", "Unknown"); chat_id = event.chat_id; stamp = raid_now_dict()
+if chat_name == "Unknown" or not chat_id: rdbg(f"skipping raid from Unknown: {chat_id}"); return
 
-# skip raids we can't identify (Unknown group / no title)
-if chat_name == "Unknown" or not chat_id:
-    rdbg(f"skipping raid from Unknown chat (chat_id={chat_id})")
-    return
-    
 for url in new_urls:
             smashed[url] = {
                 "date": stamp["date"], "time": stamp["time"],
