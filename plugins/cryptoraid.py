@@ -1,6 +1,6 @@
 # =============================================================================
-#  CipherElite Plugin - cryptoraid v6.0
-#  Smash all groups + reply flow for whitelisted + queue bot DM + NL commands
+#  CipherElite Plugin - cryptoraid v6.1
+#  Smash all + reply DM via queue bot + SMASH LOG only
 # =============================================================================
 
 from telethon import events, Button, TelegramClient
@@ -19,9 +19,9 @@ import aiohttp
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-print("[cryptoraid] IMPORTING v6.0")
+print("[cryptoraid] IMPORTING v6.1")
 
-VERSION = "6.0.0"
+VERSION = "6.1.0"
 CATEGORY = "utilities"
 
 # ═══════════════════════════════════════════════════════════════
@@ -37,8 +37,7 @@ def raid_now():
 #  CONFIG
 # ═══════════════════════════════════════════════════════════════
 
-SMASH_LOG_ID = -1004453857887
-REPLY_LOG_ID = -1004374819145
+SMASH_LOG_ID = -1004453857887      # ONLY log destination
 RAIDAR_USER_ID = 5994885234
 OWNER_USER_ID = 7616645514
 
@@ -49,7 +48,7 @@ OTHER_TARGETS = ['🤛', '✊', '🤜', 'Verify', 'Verified', '✅', 'Confirmed'
 VERIFY_WAIT_AFTER_DONE = 30
 DM2_WAIT_SECONDS = 60
 DM1_WAIT_SECONDS = 15
-MANUAL_DONE_TIMEOUT = 600      # 10 min wait for user to tap Done
+MANUAL_DONE_TIMEOUT = 900
 DEBUG = True
 RAID_DM_KEEP = 20
 
@@ -78,15 +77,9 @@ def raid_load_db():
     except Exception as e:
         print(f"[cryptoraid] load err: {e}")
     return {
-        "smashed": {},
-        "count": 0,
-        "whitelist": [],
-        "queue": [],
-        "current_raid": None,
-        "completed": [],
-        "failed": [],
-        "raidar_dms_wl": [],     # only whitelisted raid links
-        "paused": False,
+        "smashed": {}, "count": 0, "whitelist": [], "queue": [],
+        "current_raid": None, "completed": [], "failed": [],
+        "raidar_dms_wl": [], "paused": False,
         "started": raid_now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
@@ -107,16 +100,14 @@ def raid_is_wl(chat_id):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  TOKEN LOADER — env var first, file fallback
+#  TOKEN
 # ═══════════════════════════════════════════════════════════════
 
 def raid_load_token():
-    # 1) env var
     tok = os.getenv("KCE_QUEUE_BOT_TOKEN", "").strip()
     if tok and ":" in tok and len(tok) > 40:
         rdbg(f"token from env (len={len(tok)})")
         return tok
-    # 2) file
     try:
         if QUEUE_BOT_FILE.exists():
             data = json.loads(QUEUE_BOT_FILE.read_text(encoding="utf-8"))
@@ -126,7 +117,7 @@ def raid_load_token():
                 return tok
     except Exception as e:
         print(f"[cryptoraid] token file err: {e}")
-    rdbg("NO VALID TOKEN FOUND")
+    rdbg("NO VALID TOKEN")
     return ""
 
 
@@ -161,57 +152,97 @@ def raid_now_dict():
     }
 
 
-async def raid_send_log(text, chat_id=None):
-    target = chat_id or SMASH_LOG_ID
+async def raid_fetch_tweet(url):
     try:
-        return await CipherElite.send_message(target, text)
+        m = re.search(r'(?:twitter\.com|x\.com)/([^/]+)/status/(\d+)', url)
+        if not m:
+            return None
+        user, tweet_id = m.group(1), m.group(2)
+        api = f"https://api.fxtwitter.com/{user}/status/{tweet_id}"
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(timeout=timeout) as s:
+            async with s.get(api) as r:
+                if r.status != 200:
+                    rdbg(f"fxtwitter HTTP {r.status}")
+                    return None
+                data = await r.json()
+        tweet = data.get("tweet", {}) or {}
+        author = tweet.get("author", {}) or {}
+        return {
+            "text": (tweet.get("text") or "")[:400],
+            "author": author.get("screen_name", "?"),
+            "name": author.get("name", "?"),
+            "likes": tweet.get("likes", 0),
+            "retweets": tweet.get("retweets", 0),
+            "replies": tweet.get("replies", 0),
+        }
+    except Exception as e:
+        rdbg(f"fetch_tweet err: {e}")
+        return None
+
+
+# ═══════════════════════════════════════════════════════════════
+#  LOG CARD (your original style)
+# ═══════════════════════════════════════════════════════════════
+
+async def raid_send_log(text):
+    try:
+        return await CipherElite.send_message(SMASH_LOG_ID, text)
     except Exception as e:
         print(f"[cryptoraid] log err: {e}")
         return None
 
 
-async def raid_edit_log(msg_id, text, chat_id=None):
-    target = chat_id or SMASH_LOG_ID
+async def raid_edit_log(msg_id, text):
     try:
-        await CipherElite.edit_message(target, msg_id, text)
+        await CipherElite.edit_message(SMASH_LOG_ID, msg_id, text)
     except Exception as e:
         print(f"[cryptoraid] edit err: {e}")
 
 
 def raid_build_card(raid_id, chat_name, link, steps, status="processing"):
-    emoji = {"done": "✅", "failed": "❌", "queued": "⏸️", "waiting": "⏳"}.get(status, "🎯")
-    lines = [f"{emoji} RAID #{raid_id} — {chat_name}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━", ""]
+    emoji = {
+        "done": "✅", "failed": "❌", "queued": "⏸️",
+        "waiting": "⏳", "processing": "🎯", "skip": "⏭️",
+    }.get(status, "🎯")
+    result_label = {
+        "done": "SUCCESS", "failed": "FAILED",
+        "queued": "QUEUED", "waiting": "AWAITING YOU",
+        "processing": "PROCESSING", "skip": "SMASH ONLY",
+    }.get(status, "PROCESSING")
+
+    header = (
+        "╔══════════════════════════════════════╗\n"
+        f"║  {emoji}  RAID {raid_id}\n"
+        f"║  📍  {chat_name[:32]}\n"
+        f"║  🕐  {raid_now().strftime('%I:%M:%S %p')} — {raid_now().strftime('%d/%m/%Y')}\n"
+        "╚══════════════════════════════════════╝"
+    )
+
+    body = ""
     for s in steps:
-        lines.append(s)
-        lines.append("")
-    lines.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    lines.append(f"🔗 {link}")
-    lines.append(f"💬 {chat_name}")
-    lines.append(f"⏰ {raid_now().strftime('%I:%M:%S %p')} — {raid_now().strftime('%d/%m/%Y')} WAT")
-    return "\n".join(lines)
+        body += "\n━━━━━━━━━━━━━━━━━━━━━━━━━\n" + s + "\n"
+
+    footer = (
+        "\n━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+        f"  🔗  {link}\n"
+        f"  💬  {chat_name}\n"
+        f"  📊  Result: {result_label}\n\n"
+        f"  {emoji}  END — RAID {raid_id}\n"
+        "╚══════════════════════════════════════╝"
+    )
+    return header + body + footer
 
 
 # ═══════════════════════════════════════════════════════════════
-#  RAIDAR DM LINK STORAGE — whitelisted raids only
+#  RAIDAR DM LINK STORAGE
 # ═══════════════════════════════════════════════════════════════
 
 def raid_store_dm_link(link, chat_id, raid_id):
     dms = RAID_DB.get("raidar_dms_wl", [])
-    dms.append({
-        "link": link,
-        "chat_id": chat_id,
-        "raid_id": raid_id,
-        "ts": raid_now().timestamp(),
-    })
+    dms.append({"link": link, "chat_id": chat_id, "raid_id": raid_id, "ts": raid_now().timestamp()})
     RAID_DB["raidar_dms_wl"] = dms[-RAID_DM_KEEP:]
     raid_save_db(RAID_DB)
-
-
-def raid_find_dm_link(link):
-    for dm in RAID_DB.get("raidar_dms_wl", []):
-        if dm.get("link") == link:
-            return dm
-    return None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -228,7 +259,7 @@ async def raid_start_bot():
         return
     QUEUE_BOT_TOKEN = raid_load_token()
     if not QUEUE_BOT_TOKEN:
-        rdbg("queue bot: NO TOKEN")
+        rdbg("no token")
         return
     try:
         bot = TelegramClient(str(QUEUE_BOT_SESSION), 6, "eb06d4abfb49dc3eeb1aeb98ae0f581e")
@@ -275,7 +306,7 @@ def init(client_instance):
         ".cryptoraid - status",
         ".cryptoraid_stats - stats",
         ".cryptoraid_queue - queue",
-        ".cryptoraid_reset - reset records",
+        ".cryptoraid_reset - reset",
         ".cryptoraid_pause - pause",
         ".cryptoraid_resume - resume",
         ".commands - cheat sheet",
@@ -283,14 +314,15 @@ def init(client_instance):
         "..wl off - remove whitelist",
         "..wl list - list whitelisted",
     ]
-    add_handler("cryptoraid", commands, "🎯 Raid v6.0 — smash + reply + NL")
+    add_handler("cryptoraid", commands, "🎯 Raid v6.1 — smash + DM reply flow")
     print("[cryptoraid] commands registered")
 
 print("[cryptoraid] MODULE LOADED — chunk 1")
 
 # ═══ END OF CHUNK 1 ═══
+
 # ═══════════════════════════════════════════════════════════════
-#  GEMINI — 4 reply variants
+#  GEMINI — 4 replies
 # ═══════════════════════════════════════════════════════════════
 
 _gemini_client = None
@@ -314,7 +346,6 @@ async def raid_gen_replies(link, chat_name):
     client = raid_gemini_client()
     if client is None:
         return fallback
-
     prompt = f"""Generate 4 DIFFERENT short casual replies (max 5 words each) to a crypto raid tweet.
 
 Link: {link}
@@ -328,7 +359,6 @@ Rules:
 - friendly, real, not spammy
 
 Output exactly 4 lines. Just the replies, no numbers."""
-
     try:
         from google.genai import types
         resp = await client.aio.models.generate_content(
@@ -367,7 +397,7 @@ async def cmd_status(event):
         paused = RAID_DB.get("paused", False)
         bot_st = "✅ online" if (QUEUE_BOT and QUEUE_BOT.is_connected()) else "❌ offline"
         msg = (
-            f"🎯 **Crypto Raid v6.0**\n"
+            f"🎯 **Crypto Raid v6.1**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"{'⏸️ PAUSED' if paused else '✅ Active'}\n"
             f"👊 Smashes: `{RAID_DB.get('count', 0)}`\n"
@@ -443,7 +473,7 @@ async def cmd_reset(event):
 async def cmd_pause(event):
     RAID_DB["paused"] = True
     raid_save_db(RAID_DB)
-    await event.reply("⏸️ Raid replies PAUSED")
+    await event.reply("⏸️ PAUSED")
 
 
 @CipherElite.on(events.NewMessage(pattern=r"\.cryptoraid_resume$"))
@@ -525,11 +555,10 @@ async def cmd_commands(event):
         "`.cryptoraid_reset`\n"
         "`..wl` — whitelist current\n"
         "`..wl off` — unwhitelist\n"
-        "`..wl list` — list groups\n\n"
+        "`..wl list` — list\n\n"
         "**Natural language (DM only):**\n"
         "• whats our raid status\n"
-        "• pause all raids\n"
-        "• resume all raids\n"
+        "• pause all raids / resume all raids\n"
         "• whitelist this group\n"
         "• show me all groups for raid replies\n"
         "• whats our raid queue\n"
@@ -538,7 +567,7 @@ async def cmd_commands(event):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  CALLBACK HANDLERS (buttons)
+#  BUTTON HANDLERS — FIXED
 # ═══════════════════════════════════════════════════════════════
 
 async def raid_handle_cb(event, data):
@@ -555,31 +584,73 @@ async def raid_handle_cb(event, data):
             opts = cur.get("reply_options", [])
             if idx >= len(opts):
                 return await event.answer("Invalid", alert=True)
+
             chosen = opts[idx]
             cur["chosen_reply"] = chosen
             RAID_DB["current_raid"] = cur
             raid_save_db(RAID_DB)
+
             await event.answer(f"✅ Reply #{idx+1} selected")
+
+            # build rich DM
+            td = cur.get("tweet_data") or {}
+            tweet_block = ""
+            if cur.get("tweet_text"):
+                tweet_block = (
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"📝 ORIGINAL POST\n"
+                    f"👤 @{cur.get('tweet_author', '?')}\n"
+                    f"💬 \"{cur['tweet_text'][:250]}\"\n"
+                    f"❤️ {td.get('likes', 0)}  🔁 {td.get('retweets', 0)}\n"
+                )
+
             new_text = (
-                f"🎯 **RAID #{cur['raid_id']}**\n"
-                f"📍 {cur['chat_name']}\n"
-                f"━━━━━━━━━━━━━━━━━━━━\n"
-                f"📋 **Selected reply #{idx+1}:**\n\n"
+                "╔══════════════════════════════════════╗\n"
+                f"║  🎯  RAID #{cur['raid_id']}\n"
+                f"║  📍  {cur['chat_name'][:32]}\n"
+                f"║  🕐  {raid_now().strftime('%I:%M:%S %p')} WAT\n"
+                "╚══════════════════════════════════════╝\n"
+                f"{tweet_block}"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"📋 SELECTED REPLY #{idx+1}\n"
+                "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                 f"`{chosen}`\n\n"
-                f"**Long-press the reply above to copy**\n"
-                f"Then tap 🔗 to open and paste."
+                "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                "  📌 Long-press the reply to copy\n"
+                "  🔗 Tap below to open the post\n"
+                "  ✅ Paste on X, come back, tap Done\n"
+                "╚══════════════════════════════════════╝"
             )
             deeplink = cur.get("link_deeplink") or f"https://{cur['link']}"
+
+            # buttons: URL button + callback button in SEPARATE rows
+            from telethon.tl.custom import Button as TLButton
             buttons = [
-                [Button.inline("🔗 Open X post", url=deeplink)],
-                [Button.inline("✅ Done — I posted it", f"done:{cur['raid_id']}".encode())],
+                [TLButton.url("🔗 Open X post", deeplink)],
+                [TLButton.inline("✅ Done — I posted it", f"done:{cur['raid_id']}".encode())],
             ]
+
+            # ── try edit, fallback to NEW message
+            edited = False
             try:
                 await event.edit(new_text, buttons=buttons)
+                edited = True
+                rdbg("DM edit OK")
             except Exception as e:
-                rdbg(f"edit err: {e}")
+                rdbg(f"edit failed: {type(e).__name__}: {e}")
+
+            if not edited:
+                try:
+                    await QUEUE_BOT.send_message(event.sender_id, new_text, buttons=buttons)
+                    rdbg("fallback DM sent")
+                except Exception as e2:
+                    rdbg(f"fallback err: {e2}")
         except Exception as e:
-            await event.answer(f"err: {e}", alert=True)
+            print(f"[cryptoraid] copy cb err: {e}")
+            try:
+                await event.answer(f"err: {e}", alert=True)
+            except Exception:
+                pass
         return
 
     # ── done
@@ -589,32 +660,38 @@ async def raid_handle_cb(event, data):
             cur = RAID_DB.get("current_raid")
             if not cur or str(cur.get("raid_id")) != rid:
                 return await event.answer("Not current raid", alert=True)
+
             cur["manual_done"] = True
             cur["manual_done_ts"] = raid_now().timestamp()
             cur["steps"].append(
                 f"5️⃣ ✅ YOU POSTED IT\n"
+                f"   ▸ Chosen reply: `{cur.get('chosen_reply', '?')[:60]}`\n"
                 f"   ▸ Waiting {VERIFY_WAIT_AFTER_DONE}s then verify\n"
                 f"   ▸ Time: {raid_now().strftime('%I:%M:%S %p')}"
             )
             RAID_DB["current_raid"] = cur
             raid_save_db(RAID_DB)
+
             if cur.get("log_msg_id"):
                 await raid_edit_log(
                     cur["log_msg_id"],
                     raid_build_card(cur["raid_id"], cur["chat_name"],
-                                    f"https://{cur['link']}", cur["steps"], "processing"),
-                    cur.get("log_chat_id")
+                                    f"https://{cur['link']}", cur["steps"], "processing")
                 )
-            await event.answer("✅ Marked done")
+            await event.answer("✅ Marked posted — verifying soon")
         except Exception as e:
-            await event.answer(f"err: {e}", alert=True)
+            print(f"[cryptoraid] done cb err: {e}")
+            try:
+                await event.answer(f"err: {e}", alert=True)
+            except Exception:
+                pass
         return
 
     await event.answer("unknown")
 
 
 # ═══════════════════════════════════════════════════════════════
-#  NATURAL LANGUAGE HANDLERS
+#  NATURAL LANGUAGE
 # ═══════════════════════════════════════════════════════════════
 
 NL_MAP = [
@@ -645,16 +722,15 @@ async def raid_nl_match(text):
         ".cryptoraid - status",
         ".cryptoraid_stats - stats",
         ".cryptoraid_queue - queue",
-        ".cryptoraid_pause - pause raids",
-        ".cryptoraid_resume - resume raids",
+        ".cryptoraid_pause - pause",
+        ".cryptoraid_resume - resume",
         "..wl - whitelist current group",
         "..wl off - remove whitelist",
         "..wl list - list whitelisted",
     ]
     prompt = (
-        f'User said: "{text}"\n\n'
-        f"Available commands:\n" + "\n".join(commands) +
-        "\n\nReply with ONLY the exact command, or NONE if nothing matches."
+        f'User said: "{text}"\n\nAvailable commands:\n' + "\n".join(commands) +
+        "\n\nReply with ONLY the exact command, or NONE."
     )
     try:
         from google.genai import types
@@ -770,16 +846,50 @@ async def raid_detector(event):
         raid_save_db(RAID_DB)
 
         is_wl = raid_is_wl(chat_id)
+        tweet_data = await raid_fetch_tweet(new_urls[0])
+        tweet_text = (tweet_data or {}).get("text", "")
+        tweet_author = (tweet_data or {}).get("author", "")
 
-        steps = [f"1️⃣ 👊 SMASH DONE ✅\n   ▸ Clicked `{clicked_text}`"]
-
+        # ─── NOT whitelisted
         if not is_wl:
-            steps.append(f"2️⃣ ⛔ NOT WHITELISTED\n   ▸ `{chat_name}` — smash only, no reply flow")
-            card = raid_build_card(raid_id, chat_name, f"https://{new_urls[0]}", steps, "done")
+            steps = [
+                f"1️⃣ 👊 SMASH DONE ✅\n"
+                f"   ▸ Detected raid keywords + X link\n"
+                f"   ▸ Found '{clicked_text}' button\n"
+                f"   ▸ Clicked successfully (~0.8s)"
+            ]
+            steps.append(
+                f"2️⃣ ⛔ WHITELIST SKIP\n"
+                f"   ▸ '{chat_name}' not in reply whitelist\n"
+                f"   ▸ Smash logged, reply skipped\n"
+                f"   ▸ Use `..wl` in this group to enable replies"
+            )
+            if tweet_text:
+                steps.append(
+                    f"📝 ORIGINAL POST by @{tweet_author}\n"
+                    f"   ▸ \"{tweet_text[:180]}\""
+                )
+            card = raid_build_card(raid_id, chat_name, f"https://{new_urls[0]}", steps, "skip")
             await raid_send_log(card)
             return
 
-        steps.append(f"2️⃣ ✅ WHITELISTED\n   ▸ Reply flow initiated")
+        # ─── Whitelisted — full reply flow
+        steps = [
+            f"1️⃣ 👊 SMASH DONE ✅\n"
+            f"   ▸ Detected raid keywords + X link\n"
+            f"   ▸ Found '{clicked_text}' button\n"
+            f"   ▸ Clicked successfully (~0.8s)"
+        ]
+        steps.append(
+            f"2️⃣ ✅ WHITELIST CHECK\n"
+            f"   ▸ '{chat_name}' is whitelisted\n"
+            f"   ▸ Reply flow initiated"
+        )
+        if tweet_text:
+            steps.append(
+                f"📝 ORIGINAL POST by @{tweet_author}\n"
+                f"   ▸ \"{tweet_text[:180]}\""
+            )
         steps.append(f"3️⃣ ⏳ WAITING FOR RAIDAR DM #1...")
 
         raid_obj = {
@@ -796,7 +906,6 @@ async def raid_detector(event):
             "status": "queued",
             "steps": steps,
             "log_msg_id": None,
-            "log_chat_id": REPLY_LOG_ID,
             "reply_options": [],
             "chosen_reply": None,
             "manual_done": False,
@@ -806,6 +915,9 @@ async def raid_detector(event):
             "dm2_received": False,
             "dm2_time": None,
             "verify_clicked": False,
+            "tweet_text": tweet_text,
+            "tweet_author": tweet_author,
+            "tweet_data": tweet_data or {},
         }
         queue = RAID_DB.get("queue", [])
         queue.append(raid_obj)
@@ -813,7 +925,7 @@ async def raid_detector(event):
         raid_save_db(RAID_DB)
 
         card = raid_build_card(raid_id, chat_name, f"https://{new_urls[0]}", steps, "queued")
-        log_msg = await raid_send_log(card, REPLY_LOG_ID)
+        log_msg = await raid_send_log(card)
         if log_msg:
             raid_obj["log_msg_id"] = log_msg.id
             for i, r in enumerate(queue):
@@ -841,7 +953,7 @@ async def raidar_watcher(event):
         urls = raid_extract_x_urls(text)
         dm_link = urls[0] if urls else None
 
-        # ── DM #1: smash confirmed
+        # ── DM #1
         if "How to earn reply XP" in text or "Raid Tweet" in text:
             cur = RAID_DB.get("current_raid")
             if cur and dm_link and dm_link == cur.get("link"):
@@ -849,7 +961,9 @@ async def raidar_watcher(event):
                 cur["dm1_time"] = stamp["time12"]
                 cur["steps"].append(
                     f"4️⃣ 📩 RAIDAR DM #1 ✅\n"
-                    f"   ▸ Matched link\n   ▸ Time: {stamp['time12']}"
+                    f"   ▸ \"How to earn reply XP\"\n"
+                    f"   ▸ Smash CONFIRMED by Raidar\n"
+                    f"   ▸ Time: {stamp['time12']}"
                 )
                 raid_store_dm_link(dm_link, cur.get("chat_id"), cur.get("raid_id"))
                 RAID_DB["current_raid"] = cur
@@ -858,15 +972,12 @@ async def raidar_watcher(event):
                     await raid_edit_log(
                         cur["log_msg_id"],
                         raid_build_card(cur["raid_id"], cur["chat_name"],
-                                        f"https://{cur['link']}", cur["steps"], "processing"),
-                        cur.get("log_chat_id")
+                                        f"https://{cur['link']}", cur["steps"], "processing")
                     )
                 rdbg(f"DM#1 matched raid {cur['raid_id']}")
-            else:
-                rdbg(f"DM#1 no match (link={dm_link})")
             return
 
-        # ── DM #2: XP confirmed
+        # ── DM #2
         if "Reply verified" in text or "Received 3 XP" in text or "XP" in text:
             cur = RAID_DB.get("current_raid")
             if cur and cur.get("manual_done"):
@@ -874,20 +985,15 @@ async def raidar_watcher(event):
                 cur["dm2_time"] = stamp["time12"]
                 cur["steps"].append(
                     f"8️⃣ 🎉 RAIDAR DM #2 — XP CONFIRMED ✅\n"
-                    f"   ▸ \"{text[:100]}\"\n   ▸ Time: {stamp['time12']}"
+                    f"   ▸ \"{text[:100]}\"\n"
+                    f"   ▸ Time: {stamp['time12']}"
                 )
                 if cur.get("log_msg_id"):
                     await raid_edit_log(
                         cur["log_msg_id"],
                         raid_build_card(cur["raid_id"], cur["chat_name"],
-                                        f"https://{cur['link']}", cur["steps"], "done"),
-                        cur.get("log_chat_id")
+                                        f"https://{cur['link']}", cur["steps"], "done")
                     )
-                await raid_send_log(
-                    f"🎉 **RAID #{cur['raid_id']} WON** — {cur['chat_name']}\n"
-                    f"🔗 {cur['link']}\n🕐 {stamp['time12']}",
-                    SMASH_LOG_ID
-                )
                 completed = RAID_DB.get("completed", [])
                 completed.append({
                     "raid_id": cur["raid_id"], "chat": cur["chat_name"],
@@ -897,10 +1003,12 @@ async def raidar_watcher(event):
                 RAID_DB["completed"] = completed[-100:]
                 RAID_DB["current_raid"] = None
                 raid_save_db(RAID_DB)
-                await raid_dm_owner(f"🎉 Raid #{cur['raid_id']} WON — XP confirmed!")
+                await raid_dm_owner(
+                    f"🎉 Raid #{cur['raid_id']} WON!\n"
+                    f"📍 {cur['chat_name']}\n🔗 {cur['link']}\n"
+                    f"✅ XP confirmed"
+                )
             return
-
-        rdbg(f"raidar unknown: {text[:100]}")
     except Exception as e:
         print(f"[cryptoraid] raidar watcher err: {e}")
 
@@ -927,10 +1035,9 @@ async def raid_process_queue():
             chat_name = raid["chat_name"]
             link = raid["link"]
             log_msg_id = raid.get("log_msg_id")
-            log_chat_id = raid.get("log_chat_id")
 
             try:
-                # wait for raidar DM #1 (max 15s)
+                # wait for raidar DM #1
                 for _ in range(DM1_WAIT_SECONDS * 2):
                     await asyncio.sleep(0.5)
                     cur = RAID_DB.get("current_raid")
@@ -944,29 +1051,49 @@ async def raid_process_queue():
                 # generate replies
                 steps.append(f"5️⃣ 🧠 GENERATING 4 REPLIES...")
                 if log_msg_id:
-                    await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "processing"), log_chat_id)
+                    await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "processing"))
 
                 replies = await raid_gen_replies(link, chat_name)
                 raid["reply_options"] = replies
-                steps[-1] = f"5️⃣ 🧠 4 REPLIES READY ✅"
+                steps[-1] = (
+                    f"5️⃣ 🧠 4 REPLIES READY ✅\n"
+                    + "\n".join([f"   {i+1}. {r}" for i, r in enumerate(replies)])
+                )
                 RAID_DB["current_raid"] = raid
                 raid_save_db(RAID_DB)
                 if log_msg_id:
-                    await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "processing"), log_chat_id)
+                    await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "processing"))
 
                 # DM owner
-                steps.append(f"6️⃣ 📱 SENDING DM...")
+                steps.append(f"6️⃣ 📱 SENDING DM TO YOU...")
                 if log_msg_id:
-                    await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "processing"), log_chat_id)
+                    await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "processing"))
+
+                td = raid.get("tweet_data") or {}
+                tweet_block = ""
+                if raid.get("tweet_text"):
+                    tweet_block = (
+                        "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                        f"📝 ORIGINAL POST\n"
+                        f"👤 @{raid.get('tweet_author', '?')} — {td.get('name', '')}\n"
+                        f"💬 \"{raid['tweet_text'][:250]}\"\n"
+                        f"❤️ {td.get('likes', 0)}  🔁 {td.get('retweets', 0)}  💭 {td.get('replies', 0)}\n"
+                    )
 
                 dm_text = (
-                    f"🎯 **RAID #{raid_id}**\n"
-                    f"📍 {chat_name}\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"**Pick a reply:**\n\n"
+                    "╔══════════════════════════════════════╗\n"
+                    f"║  🎯  RAID #{raid_id}\n"
+                    f"║  📍  {chat_name[:32]}\n"
+                    f"║  🕐  {raid_now().strftime('%I:%M:%S %p')} WAT\n"
+                    "╚══════════════════════════════════════╝\n"
+                    f"{tweet_block}"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "🎯 PICK A REPLY\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
                     + "\n".join([f"**{i+1}.** {r}" for i, r in enumerate(replies)])
-                    + f"\n\n━━━━━━━━━━━━━━━━━━━━\n"
-                    f"Tap a number → you'll get the reply + link + Done button."
+                    + "\n\n━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "  👇 Tap a number below\n"
+                    "╚══════════════════════════════════════╝"
                 )
                 dm_buttons = [[
                     Button.inline("1️⃣", b"copy:0"),
@@ -976,23 +1103,20 @@ async def raid_process_queue():
                 ]]
                 dm = await raid_dm_owner(dm_text, dm_buttons)
                 if dm:
-                    steps[-1] = f"6️⃣ 📱 DM SENT ✅"
+                    steps[-1] = f"6️⃣ 📱 DM SENT ✅\n   ▸ Waiting for your pick..."
                 else:
-                    steps[-1] = f"6️⃣ ❌ DM FAILED"
+                    steps[-1] = f"6️⃣ ❌ DM FAILED — bot offline"
                 RAID_DB["current_raid"] = raid
                 raid_save_db(RAID_DB)
                 if log_msg_id:
-                    await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "waiting"), log_chat_id)
+                    await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "waiting"))
 
                 if not dm:
-                    steps.append("⛔ Queue bot offline — aborting reply flow")
-                    if log_msg_id:
-                        await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "failed"), log_chat_id)
                     RAID_DB["current_raid"] = None
                     raid_save_db(RAID_DB)
                     continue
 
-                # wait for Done tap (max 10 min)
+                # wait for Done
                 for _ in range(MANUAL_DONE_TIMEOUT * 2):
                     await asyncio.sleep(0.5)
                     cur = RAID_DB.get("current_raid")
@@ -1003,18 +1127,18 @@ async def raid_process_queue():
                 raid = RAID_DB.get("current_raid", raid)
                 if not raid.get("manual_done"):
                     steps = raid["steps"]
-                    steps.append(f"⏰ TIMEOUT — no Done tap")
+                    steps.append(f"⏰ TIMEOUT — no Done tap in {MANUAL_DONE_TIMEOUT//60} min")
                     if log_msg_id:
-                        await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "failed"), log_chat_id)
+                        await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "failed"))
                     RAID_DB["current_raid"] = None
                     raid_save_db(RAID_DB)
                     continue
 
-                # 30s wait
+                # wait 30s
                 steps = raid["steps"]
                 steps.append(f"7️⃣ ⏳ WAITING {VERIFY_WAIT_AFTER_DONE}s...")
                 if log_msg_id:
-                    await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "processing"), log_chat_id)
+                    await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "processing"))
 
                 await asyncio.sleep(VERIFY_WAIT_AFTER_DONE)
 
@@ -1035,17 +1159,21 @@ async def raid_process_queue():
                 except Exception as e:
                     print(f"[cryptoraid] verify err: {e}")
 
-                steps[-1] = f"7️⃣ {'✅ VERIFY CLICKED' if verify_clicked else '⚠️ VERIFY NOT FOUND'}"
+                steps[-1] = (
+                    f"7️⃣ ✅ VERIFY CLICKED ✅\n   ▸ Time: {raid_now().strftime('%I:%M:%S %p')}"
+                    if verify_clicked else
+                    f"7️⃣ ⚠️ VERIFY NOT FOUND"
+                )
                 raid["verify_clicked"] = verify_clicked
                 RAID_DB["current_raid"] = raid
                 raid_save_db(RAID_DB)
                 if log_msg_id:
-                    await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "processing"), log_chat_id)
+                    await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "processing"))
 
                 # wait for DM #2
-                steps.append(f"⏳ WAITING FOR DM #2 ({DM2_WAIT_SECONDS}s)...")
+                steps.append(f"⏳ WAITING FOR RAIDAR DM #2 ({DM2_WAIT_SECONDS}s)...")
                 if log_msg_id:
-                    await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "processing"), log_chat_id)
+                    await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "processing"))
 
                 for _ in range(DM2_WAIT_SECONDS * 2):
                     await asyncio.sleep(0.5)
@@ -1057,7 +1185,7 @@ async def raid_process_queue():
                 if not raid.get("dm2_received"):
                     steps[-1] = f"❌ NO DM #2 IN {DM2_WAIT_SECONDS}s"
                     if log_msg_id:
-                        await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "failed"), log_chat_id)
+                        await raid_edit_log(log_msg_id, raid_build_card(raid_id, chat_name, f"https://{link}", steps, "failed"))
                     failed = RAID_DB.get("failed", [])
                     failed.append({
                         "raid_id": raid_id, "chat": chat_name, "link": link,
@@ -1067,7 +1195,7 @@ async def raid_process_queue():
                     RAID_DB["failed"] = failed[-50:]
                     RAID_DB["current_raid"] = None
                     raid_save_db(RAID_DB)
-                    await raid_dm_owner(f"❌ Raid #{raid_id} — no XP")
+                    await raid_dm_owner(f"❌ Raid #{raid_id} — no XP confirmation")
             except Exception as e:
                 print(f"[cryptoraid] proc err {raid_id}: {e}")
                 RAID_DB["current_raid"] = None
@@ -1096,9 +1224,16 @@ try:
 except Exception as e:
     print(f"[cryptoraid] bootstrap init err: {e}")
 
-print("[cryptoraid] MODULE LOADED SUCCESSFULLY — v6.0 ready")
+print("[cryptoraid] MODULE LOADED SUCCESSFULLY — v6.1 ready")
 
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║  === END OF CRYPTORAID v6.0 ===                              ║
+# ║  === END OF CRYPTORAID v6.1 ===                              ║
+# ║  • Smash ALL groups                                          ║
+# ║  • Reply flow ONLY for whitelisted                           ║
+# ║  • 4 replies via Gemini                                      ║
+# ║  • Queue bot DM with rich info + fxtwitter content           ║
+# ║  • Only logs to SMASH LOG group                              ║
+# ║  • Button tap: edit OR fallback to new message               ║
+# ║  • Verify → DM #2 → XP confirmation                          ║
 # ╚══════════════════════════════════════════════════════════════╝
