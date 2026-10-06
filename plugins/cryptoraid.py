@@ -1181,7 +1181,7 @@ async def raid_detector(event):
             print(f"[cryptoraid] click err: {e}")
             return
 
-        chat = await event.get_chat()
+chat = await event.get_chat()
 chat_name = getattr(chat, "title", "Unknown")
 chat_id = event.chat_id
 stamp = raid_now_dict()
