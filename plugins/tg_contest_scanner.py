@@ -22,7 +22,7 @@ KEYWORDS = [
     "whitelist spot", "WL spot"
 ]
 
-ALERT_CHAT_ID = None  # Set to your user ID or a group ID; None = send to "Saved Messages"
+ALERT_CHAT_ID = 7616645514  # Set to your user ID or a group ID; None = send to "Saved Messages"
 SEARCH_INTERVAL_MINUTES = 10
 MAX_RESULTS_PER_KEYWORD = 50
 SEEN_FILE = "tg_seen_ids.json"
