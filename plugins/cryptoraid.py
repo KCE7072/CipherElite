@@ -1,5 +1,5 @@
 # =============================================================================
-#  CipherElite Plugin - cryptoraid v7.7
+#  CipherElite Plugin - cryptoraid v7.8
 # =============================================================================
 
 from telethon import events, Button, TelegramClient
@@ -19,9 +19,9 @@ import aiohttp
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-print("[cryptoraid] IMPORTING v7.7")
+print("[cryptoraid] IMPORTING v7.8")
 
-VERSION = "7.7.0"
+VERSION = "7.8.0"
 CATEGORY = "utilities"
 
 RAID_WAT = timezone(timedelta(hours=1))
@@ -217,7 +217,8 @@ async def raid_fetch_tweet(url):
     except Exception as e:
         rdbg(f"fetch_tweet err: {e}")
         return None
-        # ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
 #  VERIFY — polling + cache-bypass + response inspection
 # ═══════════════════════════════════════════════════════════════
 
@@ -644,7 +645,8 @@ async def raid_edit_dm(msg_id, text, buttons=None):
     except Exception as e:
         rdbg(f"edit dm err: {e}")
         return None
-        # ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
 #  INIT
 # ═══════════════════════════════════════════════════════════════
 
@@ -663,7 +665,7 @@ def init(client_instance):
         "..wl off - remove whitelist",
         "..wl list - list whitelisted",
     ]
-    add_handler("cryptoraid", commands, "🎯 Raid v7.7")
+    add_handler("cryptoraid", commands, "🎯 Raid v7.8")
     print("[cryptoraid] commands registered")
 
 
@@ -750,7 +752,7 @@ async def cmd_status(event):
         paused = RAID_DB.get("paused", False)
         bot_st = "✅ online" if (QUEUE_BOT and QUEUE_BOT.is_connected()) else "❌ offline"
         msg = (
-            f"🎯 **Crypto Raid v7.7**\n"
+            f"🎯 **Crypto Raid v7.8**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"{'⏸️ PAUSED' if paused else '✅ Active'}\n"
             f"👊 Smashes: `{RAID_DB.get('count', 0)}`\n"
@@ -1105,7 +1107,8 @@ async def raid_nl_handler(event):
         await CipherElite.send_message("me", cmd)
     except Exception as e:
         print(f"[cryptoraid] NL err: {e}")
-        # ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
 #  SMASH DETECTOR
 # ═══════════════════════════════════════════════════════════════
 
@@ -1324,23 +1327,45 @@ async def raid_detector(event):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  RAIDAR DM WATCHER — handles New + Edited
+#  RAIDAR DM WATCHER — handles New + Edited, filters broadcasts
 # ═══════════════════════════════════════════════════════════════
 
-DM1_SIGNALS = ("how to earn reply xp", "raid tweet", "reply on x",
-               "your raid", "new raid")
+DM1_SIGNALS = ("how to earn reply xp", "reply on x", "reply on the",
+               "earn reply xp", "reply xp", "to earn reply")
 IGNORE_SIGNALS = ("raid ended", "targets reached")
+
+
+def _looks_like_broadcast(text):
+    """Raidar broadcast messages — stats only, not a DM#1 response."""
+    if not text:
+        return False
+    low = text.lower()
+    hits = 0
+    if "likes" in low and "%" in low:
+        hits += 1
+    if "retweets" in low and "%" in low:
+        hits += 1
+    if "replies" in low and "%" in low:
+        hits += 1
+    if hits >= 2:
+        return True
+    stripped = re.sub(r'[^\w\s]', '', text).strip().lower()
+    if stripped in ("raid tweet", "raid", "new raid", "raid alert"):
+        return True
+    return False
 
 
 def _is_raid_start_msg(text, has_link=False):
     if not text:
+        return False
+    if _looks_like_broadcast(text):
         return False
     low = text.lower()
     if any(p in low for p in IGNORE_SIGNALS):
         return False
     if any(p in low for p in DM1_SIGNALS):
         return True
-    if has_link and ("raid" in low or "reply" in low):
+    if has_link and ("reply" in low or "how to earn" in low):
         return True
     return False
 
@@ -1348,6 +1373,12 @@ def _is_raid_start_msg(text, has_link=False):
 async def _raidar_handle_dm(event, is_edited=False):
     try:
         text = event.raw_text or ""
+
+        # Skip Raidar broadcast spam entirely (stats cards, headers)
+        if _looks_like_broadcast(text):
+            rdbg(f"skipping broadcast msg: '{text[:60]}'")
+            return
+
         msg_id = event.message.id
         stamp = raid_now_dict()
 
@@ -1460,11 +1491,13 @@ async def _raidar_handle_dm(event, is_edited=False):
 
             if match_idx is None:
                 rdbg(f"DM#1 no match (tid={dm_tweet_id}, awaiting={len(awaiting)})")
-                await raid_send_log(
-                    f"⚠️ **Unmatched Raidar DM #1**\n"
-                    f"tid: `{dm_tweet_id}`\n"
-                    f"text: `{text[:120]}`\n"
-                    f"awaiting: `{len(awaiting)}`")
+                # Only log if we have raids waiting AND this looks like a real DM#1
+                if awaiting and any(p in text.lower() for p in DM1_SIGNALS):
+                    await raid_send_log(
+                        f"⚠️ **Unmatched Raidar DM #1**\n"
+                        f"tid: `{dm_tweet_id}`\n"
+                        f"text: `{text[:120]}`\n"
+                        f"awaiting: `{len(awaiting)}`")
                 return
 
             raid = awaiting.pop(match_idx)
@@ -1692,21 +1725,39 @@ async def raid_process_queue():
 
                 dm2_seen = False
 
-                cur = RAID_DB.get("current_raid")
-                if cur and cur.get("dm2_buffered"):
+                # buffered DM#2 (arrived before Done tap)
+                if raid.get("dm2_buffered"):
                     rdbg("using buffered DM#2")
                     dm2_seen = True
-                else:
+
+                if not dm2_seen:
                     for _ in range(DM2_WAIT_SECONDS * 2):
                         await asyncio.sleep(0.5)
+
+                        # our local reference may have been mutated by the watcher
+                        if raid.get("dm2_received"):
+                            dm2_seen = True
+                            break
+
                         cur = RAID_DB.get("current_raid")
-                        if cur and cur.get("dm2_received"):
+                        if cur is None:
+                            # watcher already finalized this raid — bail out
+                            rdbg("watcher finalized raid during wait — exiting")
+                            return
+                        if cur.get("dm2_received"):
+                            raid = cur
                             dm2_seen = True
                             break
 
                 if not dm2_seen:
                     rdbg("polling Raidar DMs for DM#2...")
                     dm2_seen = await raid_poll_dm2(tweet_id, DM2_WAIT_SECONDS)
+                    # watcher may have finalized during the poll
+                    if raid.get("dm2_received"):
+                        dm2_seen = True
+                    elif RAID_DB.get("current_raid") is None:
+                        rdbg("watcher finalized during poll — exiting")
+                        return
 
                 if not dm2_seen:
                     reason_lines = []
@@ -1835,4 +1886,4 @@ try:
 except Exception as e:
     print(f"[cryptoraid] bootstrap init err: {e}")
 
-print("[cryptoraid] MODULE LOADED SUCCESSFULLY — v7.7 ready")
+print("[cryptoraid] MODULE LOADED SUCCESSFULLY — v7.8 ready")
