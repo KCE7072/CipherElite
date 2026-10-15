@@ -1,6 +1,6 @@
 # =============================================================================
-#  CipherElite Userbot Plugin - aireply.py v3.5
-#  CONTEST MODE — calm/kind + individual LB + full learning signals
+#  CipherElite Userbot Plugin - aireply.py v3.6
+#  FLOW MODE — calm/kind + voice pressure + pidgin matcher + back-to-back
 # =============================================================================
 
 from telethon import events
@@ -21,13 +21,14 @@ from pathlib import Path
 from google import genai
 from google.genai import types
 
-print("[aireply] IMPORTING v3.5")
+print("[aireply] IMPORTING v3.6")
 
-VERSION = "3.5.0"
+VERSION = "3.6.0"
 CATEGORY = "utilities"
 DEBUG = True
 
 WAT = timezone(timedelta(hours=1))
+
 
 def wat_now():
     return datetime.now(WAT)
@@ -45,19 +46,55 @@ def dbg(msg):
 AI_LOG_CHAT_ID = -1004374819145
 QUEUE_CHAT_ID  = -1003860044937
 
-KEYWORDS = ['gm', 'hi', 'hello', 'hey', 'wagmi', 'moon', 'airdrop', 'lfg']
+KEYWORDS = [
+    'gm', 'hi', 'hello', 'hey', 'wagmi', 'moon', 'airdrop', 'lfg',
+    'altrix', 'altrixai', 'pump', 'bullish', 'tge', 'presale',
+]
 
-WORD_LIMIT_MIN = 3
-WORD_LIMIT_MAX = 5
+# ── Pace (aggressive) ──
+BEAT_MARGIN = 1.3
+MIN_PACE_SEC = 12
+MAX_PACE_SEC = 120
+IDLE_PACE_SEC = 90
 
-BEAT_MARGIN = 1.2
-MIN_PACE_SEC = 20
-MAX_PACE_SEC = 300
-IDLE_PACE_SEC = 600
+# ── Aggressive initiation ──
+INITIATE_ON_HYPE       = True
+INITIATE_CHANCE_HYPED  = 0.55
+INITIATE_CHANCE_NORMAL = 0.30
+INITIATE_CHANCE_DEAD   = 0.15
+INITIATE_MIN_GAP_SEC   = 20
+HARD_CEILING_PER_HOUR  = 400
+HARD_FLOOR_PER_HOUR    = 6
+
+# ── Voice Pressure (v3.6) ──
+VOICE_PRESSURE_ENABLED   = True
+VOICE_PRESSURE_MAX_LINES = 3       # max back-to-back msgs
+VOICE_PRESSURE_GAP_SEC   = (3, 7)  # delay between back-to-back
+VOICE_PRESSURE_TRIGGER   = 0.65    # chance to go multi-line when hyped
+VOICE_PRESSURE_COOLDOWN  = 90      # sec before next pressure burst in same room
+
+# ── Flow Mode (v3.6) ──
+FLOW_ENABLED             = True
+FLOW_FOLLOWUP_WINDOW_SEC = 45      # if no one replies to bot within this → bot continues
+FLOW_FOLLOWUP_CHANCE     = 0.5     # 50% chance to self-continue
+FLOW_CHAIN_DEPTH         = 3       # track last 3 human replies
+FLOW_ASK_BACK_CHANCE     = 0.35    # 35% chance bot asks back
+
+# ── Pidgin Matcher (v3.6) ──
+PIDGIN_ENABLED           = True
+PIDGIN_WINDOW_SEC        = 600     # room stays "pidgin" for 10 min after last pidgin msg
+PIDGIN_MARKERS = {
+    'dey', 'na', 'abi', 'wahala', 'abeg', 'omo', 'sabi', 'chop',
+    'wetin', 'shey', 'sha', 'sef', 'gan', 'nna', 'bros', 'broski',
+    'wahala', 'oyibo', 'japa', 'yawa', 'gbege', 'kparapapa',
+}
+PIDGIN_PHRASES = [
+    'how far', 'no wahala', 'e go be', 'i dey', 'you dey',
+    'we dey', 'make i', 'make we', 'shey you', 'abi no be',
+]
 
 CONTEXT_WINDOW_SEC = 86400
 CONTEXT_MAX_MESSAGES = 500
-
 ROOM_DETECT_WINDOW = 60
 
 SPEED_MODES = {
@@ -93,6 +130,7 @@ SLOW_MODE_THRESHOLD = 5
 SLOW_MODE_EXTRA_DELAY = 10
 SLOW_MODE_RESET = 3
 
+# ── System prompts ──
 SYSTEM_PROMPT = """You are KCE — a warm, kind, calm Nigerian guy in a crypto Telegram group. You're the friendliest person in the room.
 
 Your vibe:
@@ -120,7 +158,60 @@ Good examples:
 
 Reply with just the text. Nothing else."""
 
+SYSTEM_PROMPT_PIDGIN = """You are KCE — a warm, kind, calm Nigerian guy in a crypto Telegram group. You speak PIDGIN naturally, like a real Naija guy.
 
+Your vibe:
+- Calm, never loud
+- Kind, never rude
+- Warm, never cold
+- Positive, never negative
+- Fluent pidgin — you chop pidgin, you no dey form
+
+Rules:
+- Reply in 3-5 words maximum.
+- Speak pidgin naturally: "dey", "na", "abi", "wahala", "omo", "sabi", "shey", "sha", "sef".
+- NEVER speak formal English when pidgin is right.
+- Lowercase only unless it's a name.
+- 0-1 emoji max (only: ❤️ 🤝 💛 🫡 😊 🔥)
+- NEVER insult, mock, or argue.
+- NEVER take sides in drama.
+- Sound like a real Naija friend.
+
+Good examples:
+- "gm" → "morning my guy"
+- "wagmi" → "we dey together"
+- "sol going up?" → "e go pump bro 🤝"
+- "i made money" → "chop am well 🔥"
+- "how far" → "i dey o, you nko?"
+
+Reply with just the text. Nothing else."""
+
+SYSTEM_PROMPT_FOLLOWUP = """You are KCE, continuing a warm conversation in a Nigerian crypto Telegram group.
+Your last reply was short. Now you send a SHORT follow-up (2-4 words).
+- Warm, calm, kind
+- Could be: gentle question, warm agreement, small addition, kind check-in
+- Match pidgin if room is pidgin
+- Just the follow-up. Nothing else."""
+
+SYSTEM_PROMPT_ASK_BACK = """You are KCE. Someone said something and you want to gently ask them back.
+Send a SHORT follow-up QUESTION (3-6 words) that:
+- Invites them to share more
+- Is warm, kind, curious
+- Matches pidgin if room is pidgin
+- Just the question. Nothing else.
+
+Examples:
+- "you dey trade am?"
+- "how e go for you?"
+- "you don try am?"
+- "wetin you think?"
+- "you hold any?"
+"""
+
+
+print("[aireply] MODULE LOADED — chunk 1")
+
+# ═══ END OF CHUNK 1 ═══
 # ═══════════════════════════════════════════════════════════════
 #  STORAGE
 # ═══════════════════════════════════════════════════════════════
@@ -150,19 +241,25 @@ def load_db():
         "group_memory": {},
         "persona_phrases": [],
         "banned_phrases": [],
-        "aggressive": False,
+        "aggressive": True,                # v3.6 default ON
         "slow_mode_until": 0,
         "admin_last_seen": {},
         "leaderboard": {},
         "group_messages": {},
         "bot_pace": {},
+        "pidgin_rooms": {},                # v3.6: {chat_id: last_pidgin_ts}
+        "voice_pressure_cooldown": {},     # v3.6: {chat_id: last_burst_ts}
+        "flow_pending": {},                # v3.6: {chat_id: {bot_msg_id, ts, replied}}
         "started": wat_now().strftime("%Y-%m-%d %H:%M:%S"),
     }
 
 
 def save_db(data):
     try:
-        DB_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        DB_FILE.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False),
+            encoding="utf-8"
+        )
     except Exception as e:
         print(f"[aireply] save err: {e}")
 
@@ -189,9 +286,9 @@ def save_wallets(data):
 WALLETS = load_wallets()
 
 
-print("[aireply] MODULE LOADED — chunk 1")
+print("[aireply] MODULE LOADED — chunk 2 (storage)")
 
-# ═══ END OF CHUNK 1 ═══
+# ═══ END OF CHUNK 2A — helpers continue in next chunk ═══
 # ═══════════════════════════════════════════════════════════════
 #  HELPERS
 # ═══════════════════════════════════════════════════════════════
@@ -240,7 +337,7 @@ def is_dm_blacklisted(user_id):
 
 
 def is_aggressive():
-    return bool(DB.get("aggressive", False))
+    return bool(DB.get("aggressive", True))
 
 
 KEYWORD_PATTERNS = [re.compile(rf"\b{re.escape(k)}\b", re.IGNORECASE) for k in KEYWORDS]
@@ -359,31 +456,221 @@ def get_slow_mode_extra():
     return 0
 
 
-def _looks_like_friendly_question(text):
+# ═══════════════════════════════════════════════════════════════
+#  PIDGIN MATCHER (v3.6)
+# ═══════════════════════════════════════════════════════════════
+
+def is_pidgin_text(text):
+    """Return True if text contains pidgin markers."""
     if not text:
         return False
+    lower = text.lower()
+    # phrase check first
+    for p in PIDGIN_PHRASES:
+        if p in lower:
+            return True
+    # word check
+    words = re.findall(r"\b[a-z']+\b", lower)
+    hits = sum(1 for w in words if w in PIDGIN_MARKERS)
+    return hits >= 1
+
+
+def mark_pidgin_room(chat_id):
+    pr = DB.get("pidgin_rooms", {})
+    pr[str(chat_id)] = time.time()
+    DB["pidgin_rooms"] = pr
+    # not saving every time — flusher handles it
+
+
+def is_pidgin_room(chat_id):
+    pr = DB.get("pidgin_rooms", {})
+    last = pr.get(str(chat_id), 0)
+    return (time.time() - last) < PIDGIN_WINDOW_SEC
+
+
+def pick_system_prompt(chat_id):
+    if is_pidgin_room(chat_id):
+        return SYSTEM_PROMPT_PIDGIN
+    return SYSTEM_PROMPT
+
+
+# ═══════════════════════════════════════════════════════════════
+#  HOURLY CEILING GUARD (v3.6)
+# ═══════════════════════════════════════════════════════════════
+
+def _hourly_fires(chat_id):
+    bp = DB.get("bot_pace", {}).get(str(chat_id), {})
+    fires = bp.get("recent_fires", [])
+    cutoff = time.time() - 3600
+    return [t for t in fires if t > cutoff]
+
+
+def _can_fire_ceiling(chat_id):
+    return len(_hourly_fires(chat_id)) < HARD_CEILING_PER_HOUR
+
+
+def _mark_hourly_fire(chat_id):
+    bp = DB.get("bot_pace", {})
+    key = str(chat_id)
+    if key not in bp:
+        bp[key] = {}
+    fires = bp[key].get("recent_fires", [])
+    cutoff = time.time() - 3600
+    fires = [t for t in fires if t > cutoff]
+    fires.append(time.time())
+    bp[key]["recent_fires"] = fires
+    DB["bot_pace"] = bp
+    if len(fires) % 5 == 0:
+        save_db(DB)
+
+
+# ═══════════════════════════════════════════════════════════════
+#  NOISE + AGGRESSIVE INITIATION (v3.6)
+# ═══════════════════════════════════════════════════════════════
+
+def _is_noise(text, event):
+    if not text:
+        return True
     t = text.strip()
-    if len(t) < 4 or len(t) > 200:
-        return False
-    lower = t.lower()
-    has_q = "?" in t
-    q_words = ("who", "what", "when", "where", "why", "how", "which",
-               "anyone", "someone", "is there", "are there", "does anyone")
-    starts_q = any(lower.startswith(w) for w in q_words)
-    if not (has_q or starts_q):
-        return False
-    skip = ("price", "presale", "contract", "address", "wallet", "dm me",
-            "check dm", "click", "join", "invest", "guaranteed")
-    if any(s in lower for s in skip):
-        return False
-    if len(t.split()) > 15:
-        return False
-    return True
+    if len(t) <= 2:
+        return True
+    if re.fullmatch(r'https?://\S+', t):
+        return True
+    if len(t.split()) < 2 and not any(c.isalpha() for c in t):
+        return True
+    return False
 
 
-print("[aireply] MODULE LOADED — chunk 2")
+def _aggressive_should_fire(event, text, room_mode, me_id):
+    if not INITIATE_ON_HYPE:
+        return False, "disabled"
+    if not is_aggressive():
+        return False, "aggressive_off"
+    if _is_noise(text, event):
+        return False, "noise"
+    if not _can_fire_ceiling(event.chat_id):
+        return False, "ceiling"
 
-# ═══ END OF CHUNK 2 ═══
+    if room_mode in ("hyped", "celebratory"):
+        chance = INITIATE_CHANCE_HYPED
+    elif room_mode == "drama":
+        return False, "drama"
+    elif room_mode == "dead":
+        chance = INITIATE_CHANCE_DEAD
+    else:
+        chance = INITIATE_CHANCE_NORMAL
+
+    bp = DB.get("bot_pace", {}).get(str(event.chat_id), {})
+    last_init = bp.get("last_initiate_ts", 0)
+    if time.time() - last_init < INITIATE_MIN_GAP_SEC:
+        return False, "init_gap"
+
+    words = text.split()
+    hot_words = ("lfg", "wagmi", "gm", "moon", "altrix", "altrixai",
+                 "pump", "bullish", "tge", "airdrop")
+    is_real = (
+        len(words) >= 4
+        or "?" in text
+        or event.is_reply
+        or (len(words) >= 2 and any(w.lower() in hot_words for w in words))
+    )
+    if not is_real:
+        return False, "not_real"
+
+    if random.random() > chance:
+        return False, "no_roll"
+
+    bp["last_initiate_ts"] = time.time()
+    DB.setdefault("bot_pace", {})[str(event.chat_id)] = bp
+    save_db(DB)
+    return True, f"initiate_{room_mode}"
+
+
+print("[aireply] MODULE LOADED — chunk 3")
+
+# ═══ END OF CHUNK 3 ═══
+# ═══════════════════════════════════════════════════════════════
+#  FLOW MODE — Voice Pressure + Self-Continuation (v3.6)
+# ═══════════════════════════════════════════════════════════════
+
+def _in_voice_pressure_cooldown(chat_id):
+    cd = DB.get("voice_pressure_cooldown", {})
+    last = cd.get(str(chat_id), 0)
+    return (time.time() - last) < VOICE_PRESSURE_COOLDOWN
+
+
+def _mark_voice_pressure(chat_id):
+    cd = DB.get("voice_pressure_cooldown", {})
+    cd[str(chat_id)] = time.time()
+    DB["voice_pressure_cooldown"] = cd
+    save_db(DB)
+
+
+def should_voice_pressure(chat_id, room_mode):
+    """Decide whether to send a multi-message burst."""
+    if not VOICE_PRESSURE_ENABLED:
+        return False
+    if not is_aggressive():
+        return False
+    if room_mode not in ("hyped", "celebratory", "normal"):
+        return False
+    if _in_voice_pressure_cooldown(chat_id):
+        return False
+    return random.random() < VOICE_PRESSURE_TRIGGER
+
+
+def pick_pressure_line_count(room_mode):
+    if room_mode in ("hyped", "celebratory"):
+        return random.choice([2, 2, 3])
+    return random.choice([2, 2, 2, 3])
+
+
+def register_flow_pending(chat_id, bot_msg_id):
+    """Track a bot msg so we can follow up if no one replies."""
+    fp = DB.get("flow_pending", {})
+    fp[str(chat_id)] = {
+        "bot_msg_id": bot_msg_id,
+        "ts": time.time(),
+        "replied": False,
+    }
+    DB["flow_pending"] = fp
+
+
+def clear_flow_pending(chat_id):
+    fp = DB.get("flow_pending", {})
+    if str(chat_id) in fp:
+        del fp[str(chat_id)]
+        DB["flow_pending"] = fp
+        save_db(DB)
+
+
+def should_self_continue(chat_id):
+    """Check if bot should follow up on its own last msg."""
+    if not FLOW_ENABLED:
+        return False, None
+    fp = DB.get("flow_pending", {}).get(str(chat_id))
+    if not fp:
+        return False, None
+    if fp.get("replied"):
+        return False, None
+    age = time.time() - fp.get("ts", 0)
+    if age < FLOW_FOLLOWUP_WINDOW_SEC:
+        return False, None
+    if age > 300:  # too old, forget it
+        clear_flow_pending(chat_id)
+        return False, None
+    if random.random() > FLOW_FOLLOWUP_CHANCE:
+        clear_flow_pending(chat_id)
+        return False, None
+    return True, fp
+
+
+def should_ask_back(room_mode):
+    if room_mode == "drama":
+        return False
+    return random.random() < FLOW_ASK_BACK_CHANCE
+
+
 # ═══════════════════════════════════════════════════════════════
 #  INDIVIDUAL LEADERBOARD
 # ═══════════════════════════════════════════════════════════════
@@ -513,17 +800,17 @@ def should_fire_now(chat_id):
 def mark_fired(chat_id, me_id):
     bp = DB.get("bot_pace", {})
     key = str(chat_id)
-    bp[key] = {
-        "last_fire_ts": time.time(),
-        "me_id": me_id,
-    }
+    bp[key] = bp.get(key, {})
+    bp[key]["last_fire_ts"] = time.time()
+    bp[key]["me_id"] = me_id
     DB["bot_pace"] = bp
+    _mark_hourly_fire(chat_id)
     save_db(DB)
 
 
-print("[aireply] MODULE LOADED — chunk 3")
+print("[aireply] MODULE LOADED — chunk 4")
 
-# ═══ END OF CHUNK 3 ═══
+# ═══ END OF CHUNK 4 ═══
 # ═══════════════════════════════════════════════════════════════
 #  ROOM READING
 # ═══════════════════════════════════════════════════════════════
@@ -540,8 +827,10 @@ def read_room(chat_id):
     text_all = " ".join(m.get("text", "").lower() for m in recent)
 
     sad_words = ["sad", "lost", "dip", "down", "rug", "scam", "dump", "wen"]
-    happy_words = ["pump", "win", "moon", "gm", "bullish", "ath", "congrats", "let's go", "wagmi"]
-    drama_words = ["idiot", "fool", "stupid", "shut up", "dumb", "fake", "scam", "you liar"]
+    happy_words = ["pump", "win", "moon", "gm", "bullish", "ath",
+                   "congrats", "let's go", "wagmi", "lfg"]
+    drama_words = ["idiot", "fool", "stupid", "shut up", "dumb", "fake",
+                   "scam", "you liar"]
 
     has_drama = sum(text_all.count(w) for w in drama_words) >= 2
     has_happy = sum(text_all.count(w) for w in happy_words) >= 2
@@ -567,7 +856,7 @@ def room_hint(mode):
     return {
         "hyped": "Room is HYPED. Short, warm, energetic. Maybe 1 emoji.",
         "serious": "Room is serious. Clean English. No slang. Warm but respectful.",
-        "drama": "Room has DRAMA. Stay calm, don't take sides, don't engage conflict. Just be warm and neutral.",
+        "drama": "Room has DRAMA. Stay calm, don't take sides, don't engage conflict.",
         "dead": "Room is quiet. Reply gently, maybe ask a small question to revive.",
         "celebratory": "Room is celebrating. Join them, congratulate, hype warmly.",
         "normal": "Room is normal. Warm, casual, natural.",
@@ -579,16 +868,18 @@ def room_hint(mode):
 # ═══════════════════════════════════════════════════════════════
 
 def build_reply_card(n, group_name, user_name, their_msg, bot_reply,
-                     speed="normal", jump_link=None, mode=None, followup=None):
+                     speed="normal", jump_link=None, mode=None, followup=None,
+                     extra_lines=None, pidgin=False):
     mode_tag = f"  •  🎭 {mode}" if mode else ""
+    pidgin_tag = "  •  🗣️ pidgin" if pidgin else ""
     header = (
         "╔══════════════════════════════════════╗\n"
-        "║  🎯⚡💥🔥  KCE AI REPLY  🎯⚡💥🔥\n"
+        "║  🎯⚡💥🔥  KCE AI REPLY v3.6  🎯⚡💥🔥\n"
         "║  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"║  📍 {group_name[:30]}\n"
         f"║  👤 {user_name[:40]}\n"
         f"║  🕐 {wat_now().strftime('%I:%M:%S %p')} — {wat_now().strftime('%d/%m/%Y')} WAT\n"
-        f"║  ⚡ {speed}{mode_tag}\n"
+        f"║  ⚡ {speed}{mode_tag}{pidgin_tag}\n"
         "╚══════════════════════════════════════╝"
     )
     body = (
@@ -597,6 +888,9 @@ def build_reply_card(n, group_name, user_name, their_msg, bot_reply,
     )
     if followup:
         body += f'\n💬 FOLLOW-UP\n"{followup}"\n'
+    if extra_lines:
+        for i, line in enumerate(extra_lines, 1):
+            body += f'\n💥 PRESSURE #{i}\n"{line}"\n'
     body += (
         f"\n✅ SENT  •  ⚡ {speed}\n"
         f"🔗 Auto-generated reply  •  #{n}\n"
@@ -667,9 +961,6 @@ async def _is_owner(event):
         return False
 
 
-print("[aireply] MODULE LOADED — chunk 4")
-
-# ═══ END OF CHUNK 4 ═══
 # ═══════════════════════════════════════════════════════════════
 #  INIT
 # ═══════════════════════════════════════════════════════════════
@@ -684,6 +975,10 @@ def init(client_instance):
         ".kce reset - clear memory",
         ".kce help - all commands",
         ".kce speed fast|normal|slow",
+        ".kce aggressive on|off - self-initiation toggle",
+        ".kce pressure on|off - voice pressure toggle",
+        ".kce pidgin on|off - pidgin matcher toggle",
+        ".kce flow on|off - flow mode toggle",
         ".kce tz - timezone",
         ".kce room - current room read",
         ".kce leaderboard - top 10",
@@ -700,11 +995,14 @@ def init(client_instance):
         ".kcew off <id> - remove by ID",
         ".kcew list - list whitelisted",
     ]
-    description = "🤖 KCE AI Reply v3.5 — CONTEST MODE"
+    description = "🤖 KCE AI Reply v3.6 — FLOW MODE"
     add_handler("aireply", commands, description)
     print("[aireply] commands registered")
 
 
+print("[aireply] MODULE LOADED — chunk 5")
+
+# ═══ END OF CHUNK 5 ═══
 # ═══════════════════════════════════════════════════════════════
 #  STATUS
 # ═══════════════════════════════════════════════════════════════
@@ -723,8 +1021,12 @@ async def cmd_status(event):
         wg = DB.get("wallet_groups", [])
         pp = len(DB.get("persona_phrases", []))
         bp = len(DB.get("banned_phrases", []))
+
+        def _flag(v):
+            return "🟢" if v else "🔴"
+
         msg = (
-            "🤖 **KCE AI Reply v3.5** — CONTEST MODE\n"
+            "🤖 **KCE AI Reply v3.6** — FLOW MODE\n"
             "━━━━━━━━━━━━━━━━━━━━\n"
             f"🧠 Gemini: {'✅ Ready' if gemini_ok else '❌ Disabled'}\n"
             f"📝 Whitelisted: `{len(wl)}` groups\n"
@@ -732,6 +1034,10 @@ async def cmd_status(event):
             f"💬 Replies sent: `{len(replies)}`\n"
             f"🧬 Persona: `{pp}`  🚫 Banned: `{bp}`\n"
             f"⚡ Speed: `{CURRENT_SPEED}`\n"
+            f"🔥 Aggressive: {_flag(is_aggressive())}\n"
+            f"💥 Pressure: {_flag(VOICE_PRESSURE_ENABLED)}\n"
+            f"🗣️ Pidgin: {_flag(PIDGIN_ENABLED)}\n"
+            f"🌊 Flow: {_flag(FLOW_ENABLED)}\n"
             f"🕐 TZ: `WAT (UTC+1)`\n"
             f"🚫 DM blocked: `{len(bl)}`\n"
             f"🚀 Started: `{started}`\n"
@@ -769,6 +1075,7 @@ async def cmd_stats(event):
             f"🗑️ Deleted (learned): `{deleted}`",
             f"✏️ Edited (learned): `{edited}`",
             f"⚡ Speed: `{CURRENT_SPEED}`",
+            f"🔥 Aggressive: `{'ON' if is_aggressive() else 'OFF'}`",
         ]
         await _safe_reply(event, "\n".join(lines))
     except Exception as e:
@@ -820,12 +1127,16 @@ async def cmd_room(event):
         pace, reason = compute_pace(cid, me.id)
         _, top_name, top_count = get_top_human(cid, me.id)
         bot_count = get_bot_count(cid, me.id)
+        pidgin = is_pidgin_room(cid)
+        hourly = len(_hourly_fires(cid))
         lines = [
             "🏠 **Room read**",
             "━━━━━━━━━━━━━━━━━━━━",
             f"🎭 Room mode: `{mode}`",
+            f"🗣️ Pidgin room: `{'YES' if pidgin else 'no'}`",
             f"⚡ Pace: `1 per {pace}s`",
             f"📊 Bot count: `{bot_count}`",
+            f"🕐 Hourly fires: `{hourly}` / {HARD_CEILING_PER_HOUR}",
             f"🏆 Top human: `{top_name}` = `{top_count}`",
             f"💡 Reason: {reason}",
         ]
@@ -848,7 +1159,7 @@ async def cmd_leaderboard(event):
         lb = _get_lb(cid)
         counts = lb.get("counts", {})
         if not counts:
-            return await _safe_reply(event, "📭 No leaderboard data yet. Send some messages in this group.")
+            return await _safe_reply(event, "📭 No leaderboard data yet.")
         sorted_users = sorted(counts.items(), key=lambda kv: -kv[1]["count"])[:10]
         me = await CipherElite.get_me()
         lines = ["🏆 **Leaderboard (24h)**\n━━━━━━━━━━━━━━━━━━━━"]
@@ -922,6 +1233,103 @@ async def cmd_speed(event):
 
 
 # ═══════════════════════════════════════════════════════════════
+#  AGGRESSIVE TOGGLE
+# ═══════════════════════════════════════════════════════════════
+
+@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+aggressive\s+(on|off)$"))
+@rishabh()
+async def cmd_aggressive(event):
+    if not await _is_owner(event):
+        return
+    try:
+        mode = event.pattern_match.group(1).lower()
+        DB["aggressive"] = (mode == "on")
+        save_db(DB)
+        if mode == "on":
+            await _safe_reply(
+                event,
+                "🔥 **Aggressive mode ON**\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "• Bot initiates on its own\n"
+                "• Fires on hyped/normal/celebratory\n"
+                "• Pace: 12s min, 120s max\n"
+                "• Ceiling: 400/hour"
+            )
+        else:
+            await _safe_reply(event, "🛡️ **Aggressive OFF** — back to passive mode.")
+    except Exception as e:
+        await send_log(f"❌ aggressive err: `{e}`")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PRESSURE TOGGLE
+# ═══════════════════════════════════════════════════════════════
+
+@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+pressure\s+(on|off)$"))
+@rishabh()
+async def cmd_pressure(event):
+    global VOICE_PRESSURE_ENABLED
+    if not await _is_owner(event):
+        return
+    try:
+        mode = event.pattern_match.group(1).lower()
+        VOICE_PRESSURE_ENABLED = (mode == "on")
+        await _safe_reply(
+            event,
+            f"💥 **Voice Pressure {'ON' if VOICE_PRESSURE_ENABLED else 'OFF'}**\n"
+            f"• Max burst: `{VOICE_PRESSURE_MAX_LINES}` lines\n"
+            f"• Cooldown: `{VOICE_PRESSURE_COOLDOWN}s`"
+        )
+    except Exception as e:
+        await send_log(f"❌ pressure err: `{e}`")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  PIDGIN TOGGLE
+# ═══════════════════════════════════════════════════════════════
+
+@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+pidgin\s+(on|off)$"))
+@rishabh()
+async def cmd_pidgin(event):
+    global PIDGIN_ENABLED
+    if not await _is_owner(event):
+        return
+    try:
+        mode = event.pattern_match.group(1).lower()
+        PIDGIN_ENABLED = (mode == "on")
+        await _safe_reply(
+            event,
+            f"🗣️ **Pidgin Matcher {'ON' if PIDGIN_ENABLED else 'OFF'}**\n"
+            f"• Window: `{PIDGIN_WINDOW_SEC}s` after last pidgin msg"
+        )
+    except Exception as e:
+        await send_log(f"❌ pidgin err: `{e}`")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  FLOW TOGGLE
+# ═══════════════════════════════════════════════════════════════
+
+@CipherElite.on(events.NewMessage(pattern=r"\.kce\s+flow\s+(on|off)$"))
+@rishabh()
+async def cmd_flow(event):
+    global FLOW_ENABLED
+    if not await _is_owner(event):
+        return
+    try:
+        mode = event.pattern_match.group(1).lower()
+        FLOW_ENABLED = (mode == "on")
+        await _safe_reply(
+            event,
+            f"🌊 **Flow Mode {'ON' if FLOW_ENABLED else 'OFF'}**\n"
+            f"• Self-continue: {int(FLOW_FOLLOWUP_CHANCE*100)}%\n"
+            f"• Ask-back: {int(FLOW_ASK_BACK_CHANCE*100)}%"
+        )
+    except Exception as e:
+        await send_log(f"❌ flow err: `{e}`")
+
+
+# ═══════════════════════════════════════════════════════════════
 #  TZ
 # ═══════════════════════════════════════════════════════════════
 
@@ -941,9 +1349,9 @@ async def cmd_tz(event):
         await send_log(f"❌ tz err: `{e}`")
 
 
-print("[aireply] MODULE LOADED — chunk 5")
+print("[aireply] MODULE LOADED — chunk 6")
 
-# ═══ END OF CHUNK 5 ═══
+# ═══ END OF CHUNK 6 ═══
 # ═══════════════════════════════════════════════════════════════
 #  WHITELIST (.kcew)
 # ═══════════════════════════════════════════════════════════════
@@ -1119,7 +1527,7 @@ async def cmd_dm_list(event):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  WALLET STUB
+#  WALLET
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage(pattern=r"\.kce\s+wallet\s+set\s+(sol|evm|sui)\s+(\S+)$"))
@@ -1191,9 +1599,9 @@ async def cmd_wallet_flag(event):
         await send_log(f"❌ wallet flag err: `{e}`")
 
 
-print("[aireply] MODULE LOADED — chunk 6")
+print("[aireply] MODULE LOADED — chunk 7")
 
-# ═══ END OF CHUNK 6 ═══
+# ═══ END OF CHUNK 7 ═══
 # ═══════════════════════════════════════════════════════════════
 #  GEMINI
 # ═══════════════════════════════════════════════════════════════
@@ -1201,23 +1609,22 @@ print("[aireply] MODULE LOADED — chunk 6")
 _gemini_client = None
 
 
-def raid_gemini_client():
+def get_gemini_client():
     global _gemini_client
     if _gemini_client is None:
         api_key = ai_config.get_api_key()
         if not api_key:
             return None
-        from google import genai
         _gemini_client = genai.Client(api_key=api_key)
     return _gemini_client
 
 
-def _build_system_prompt(chat_id):
+def _build_system_prompt(chat_id, extra=None):
     mode = read_room(chat_id)
     hint = room_hint(mode)
     persona = get_persona_block()
     banned = get_banned_block()
-    base = SYSTEM_PROMPT
+    base = pick_system_prompt(chat_id)   # pidgin-aware
     if persona:
         base += (
             f"\n\n---\n"
@@ -1228,6 +1635,8 @@ def _build_system_prompt(chat_id):
     if banned:
         base += f"\n\n{banned}"
     base += f"\n\nCurrent room: {mode.upper()}.\n{hint}"
+    if extra:
+        base += f"\n\n{extra}"
     return base
 
 
@@ -1308,7 +1717,9 @@ Just the follow-up text. Nothing else."""
     try:
         client = genai.Client(api_key=api_key)
         config = types.GenerateContentConfig(
-            system_instruction=_build_system_prompt(chat_id),
+            system_instruction=_build_system_prompt(
+                chat_id, extra=SYSTEM_PROMPT_FOLLOWUP
+            ),
             max_output_tokens=30,
             temperature=1.3,
             top_p=0.95,
@@ -1375,6 +1786,123 @@ Just the reply text. Nothing else."""
         return None
 
 
+# ═══════════════════════════════════════════════════════════════
+#  V3.6 GENERATORS — ask-back + pressure line
+# ═══════════════════════════════════════════════════════════════
+
+async def generate_ask_back(context_block, original_text, bot_reply, chat_id):
+    """Generate a short follow-up QUESTION to invite more conversation."""
+    if not ai_config.is_enabled():
+        return None
+    api_key = ai_config.get_api_key()
+    if not api_key:
+        return None
+
+    prompt = f"""CONVERSATION CONTEXT:
+{context_block if context_block else "(no context)"}
+
+SOMEONE SAID:
+\"{original_text[:150]}\"
+
+YOU REPLIED:
+\"{bot_reply}\"
+
+Now ASK THEM BACK with a SHORT QUESTION (3-6 words).
+- Warm, curious, inviting
+- Matches pidgin if the room is pidgin
+- Not needy, not formal
+- Just the question. Nothing else."""
+
+    try:
+        client = genai.Client(api_key=api_key)
+        config = types.GenerateContentConfig(
+            system_instruction=_build_system_prompt(
+                chat_id, extra=SYSTEM_PROMPT_ASK_BACK
+            ),
+            max_output_tokens=30,
+            temperature=1.2,
+            top_p=0.95,
+        )
+        resp = await client.aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
+            config=config,
+        )
+        text = (resp.text or "").strip().replace("\n", " ").strip('"').strip("'")
+        words = text.split()
+        if len(words) > 6:
+            text = " ".join(words[:6])
+        if len(text) < 2 or len(text) > 60:
+            return None
+        if text.lower() == bot_reply.lower():
+            return None
+        dbg(f"gemini ask-back: '{text}'")
+        return text
+    except Exception as e:
+        print(f"[aireply] ask-back err: {e}")
+        return None
+
+
+async def generate_pressure_line(context_block, original_text, bot_reply,
+                                  previous_lines, chat_id):
+    """Generate one more line for a voice-pressure burst."""
+    if not ai_config.is_enabled():
+        return None
+    api_key = ai_config.get_api_key()
+    if not api_key:
+        return None
+
+    prev = " | ".join(previous_lines) if previous_lines else "(none)"
+
+    prompt = f"""CONVERSATION CONTEXT:
+{context_block if context_block else "(no context)"}
+
+SOMEONE SAID:
+\"{original_text[:150]}\"
+
+YOU ALREADY REPLIED (do NOT repeat any of these):
+{prev}
+\"{bot_reply}\"
+
+Now add ONE more short line (2-4 words) that:
+- Continues the same vibe warm and kind
+- Adds a small thought, hype, or gentle question
+- Matches pidgin if the room is pidgin
+- Is NOT a repeat of any previous line
+- Just the line. Nothing else."""
+
+    try:
+        client = genai.Client(api_key=api_key)
+        config = types.GenerateContentConfig(
+            system_instruction=_build_system_prompt(
+                chat_id, extra=SYSTEM_PROMPT_FOLLOWUP
+            ),
+            max_output_tokens=30,
+            temperature=1.35,
+            top_p=0.95,
+        )
+        resp = await client.aio.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=[types.Content(role="user", parts=[types.Part(text=prompt)])],
+            config=config,
+        )
+        text = (resp.text or "").strip().replace("\n", " ").strip('"').strip("'")
+        words = text.split()
+        if len(words) > 4:
+            text = " ".join(words[:4])
+        if len(text) < 2 or len(text) > 50:
+            return None
+        if text.lower() in [l.lower() for l in previous_lines]:
+            return None
+        if text.lower() == bot_reply.lower():
+            return None
+        dbg(f"gemini pressure: '{text}'")
+        return text
+    except Exception as e:
+        print(f"[aireply] pressure err: {e}")
+        return None
+
+
 async def _fire_online():
     try:
         await CipherElite(functions.account.UpdateStatusRequest(offline=False))
@@ -1382,9 +1910,9 @@ async def _fire_online():
         dbg(f"online ping err: {e}")
 
 
-print("[aireply] MODULE LOADED — chunk 7")
+print("[aireply] MODULE LOADED — chunk 8")
 
-# ═══ END OF CHUNK 7 ═══
+# ═══ END OF CHUNK 8 ═══
 # ═══════════════════════════════════════════════════════════════
 #  MESSAGE RECORDER
 # ═══════════════════════════════════════════════════════════════
@@ -1401,6 +1929,21 @@ async def group_message_recorder(event):
         if not sender:
             return
         user_name = format_user(sender)
+
+        # v3.6: pidgin detection
+        if PIDGIN_ENABLED and is_pidgin_text(text):
+            mark_pidgin_room(event.chat_id)
+
+        # v3.6: mark flow pending replied when human replies to bot
+        me = await CipherElite.get_me()
+        if event.is_reply:
+            try:
+                replied = await event.get_reply_message()
+                if replied and replied.sender_id == me.id:
+                    clear_flow_pending(event.chat_id)
+            except Exception:
+                pass
+
         reply_to_name = None
         reply_to_text = None
         if event.is_reply:
@@ -1422,6 +1965,31 @@ async def group_message_recorder(event):
 #  MAIN REPLY HANDLER
 # ═══════════════════════════════════════════════════════════════
 
+async def _do_send_with_typing(event, text, total_delay):
+    """Send a reply with typing indicator + delay."""
+    try:
+        await _fire_online()
+        first = max(1, total_delay // 2)
+        second = max(1, total_delay - first)
+        async with CipherElite.action(event.chat_id, "typing"):
+            await asyncio.sleep(first)
+        await asyncio.sleep(random.uniform(0.3, 1.0))
+        async with CipherElite.action(event.chat_id, "typing"):
+            await asyncio.sleep(second)
+    except Exception:
+        await asyncio.sleep(total_delay)
+
+    try:
+        sent = await event.reply(text)
+        return sent
+    except FloodWaitError as e:
+        await asyncio.sleep(e.seconds + 1)
+        return await event.reply(text)
+    except Exception as e:
+        print(f"[aireply] send err: {e}")
+        return None
+
+
 @CipherElite.on(events.NewMessage)
 async def kce_reply_handler(event):
     try:
@@ -1438,6 +2006,11 @@ async def kce_reply_handler(event):
         if sender and sender.id == me.id:
             return
 
+        # ceiling guard
+        if not _can_fire_ceiling(event.chat_id):
+            dbg(f"ceiling reached for {event.chat_id}")
+            return
+
         if not should_fire_now(event.chat_id):
             pace, _ = compute_pace(event.chat_id, me.id)
             dbg(f"pace block: need {pace}s between fires")
@@ -1446,27 +2019,44 @@ async def kce_reply_handler(event):
         triggered = False
         trigger_type = None
 
+        # ── Trigger path 1: continuation on bot's own msg ──
         if event.is_reply:
             replied = await event.get_reply_message()
             if replied and replied.sender_id == me.id:
                 triggered, trigger_type = True, "continuation"
+
+        # ── Trigger path 2: mention ──
         if not triggered and me.username and f"@{me.username.lower()}" in text.lower():
             triggered, trigger_type = True, "mention"
+
+        # ── Trigger path 3: keyword ──
         if not triggered and has_trigger(text):
             triggered, trigger_type = True, "keyword"
+
+        # ── Trigger path 4: friendly question ──
         if not triggered and _looks_like_friendly_question(text):
             bp = DB.get("bot_pace", {}).get(str(event.chat_id), {})
             last = bp.get("last_fire_ts", 0)
             if time.time() - last >= 60:
                 triggered, trigger_type = True, "friendly_q"
 
+        # ── Trigger path 5: AGGRESSIVE INITIATION (v3.6) ──
         if not triggered:
-            return
+            room_mode_pre = read_room(event.chat_id)
+            should, reason = _aggressive_should_fire(event, text, room_mode_pre, me.id)
+            if should:
+                triggered = True
+                trigger_type = reason
+                dbg(f"AGGRESSIVE INITIATE — {reason}")
+            else:
+                dbg(f"skip: {reason}")
+                return
 
         dbg(f"trigger={trigger_type} chat={event.chat_id} text='{text[:50]}'")
 
         context_block = get_context(event.chat_id, limit=400)
 
+        # ── Generate main reply ──
         if trigger_type == "friendly_q":
             reply_text = await generate_friendly_reply(context_block, text, event.chat_id)
         else:
@@ -1486,40 +2076,73 @@ async def kce_reply_handler(event):
             return
 
         mode = read_room(event.chat_id)
+
+        # ── Delay computation ──
         base_delay = get_delay()
         if mode == "hyped":
             base_delay = max(1, base_delay // 2)
         elif mode == "dead":
             base_delay = int(base_delay * 1.5)
+        if trigger_type and trigger_type.startswith("initiate_"):
+            base_delay = max(1, base_delay // 2)
         total_delay = base_delay + get_slow_mode_extra()
 
-        try:
-            await _fire_online()
-            first = max(1, total_delay // 2)
-            second = max(1, total_delay - first)
-            async with CipherElite.action(event.chat_id, "typing"):
-                await asyncio.sleep(first)
-            await asyncio.sleep(random.uniform(0.3, 1.0))
-            async with CipherElite.action(event.chat_id, "typing"):
-                await asyncio.sleep(second)
-        except Exception as e:
-            await asyncio.sleep(total_delay)
-
-        try:
-            sent = await event.reply(reply_text)
-            dbg(f"sent: '{reply_text}'")
-        except FloodWaitError as e:
-            await asyncio.sleep(e.seconds + 1)
-            sent = await event.reply(reply_text)
-        except Exception as e:
-            print(f"[aireply] send err: {e}")
+        sent = await _do_send_with_typing(event, reply_text, total_delay)
+        if not sent:
             return
 
         mark_fired(event.chat_id, me.id)
         record_individual(event.chat_id, me.id, "KCE")
 
+        # ── Register flow pending (so we can self-continue) ──
+        register_flow_pending(event.chat_id, sent.id)
+
+        # ── Voice Pressure Burst (v3.6) ──
+        pressure_lines = []
+        if should_voice_pressure(event.chat_id, mode):
+            n_lines = pick_pressure_line_count(mode)
+            for i in range(n_lines - 1):
+                await asyncio.sleep(random.uniform(*VOICE_PRESSURE_GAP_SEC))
+                line = await generate_pressure_line(
+                    context_block, text, reply_text,
+                    pressure_lines, event.chat_id
+                )
+                if not line:
+                    break
+                try:
+                    async with CipherElite.action(event.chat_id, "typing"):
+                        await asyncio.sleep(random.uniform(0.8, 1.8))
+                    extra = await event.reply(line)
+                    pressure_lines.append(line)
+                    record_individual(event.chat_id, me.id, "KCE")
+                    # if user replies to this extra, clear pending
+                    clear_flow_pending(event.chat_id)
+                except Exception as e:
+                    dbg(f"pressure send err: {e}")
+                    break
+            if pressure_lines:
+                _mark_voice_pressure(event.chat_id)
+
+        # ── Ask-back (v3.6) — inline with main reply if rolled ──
+        ask_back_text = None
+        if FLOW_ENABLED and should_ask_back(mode) and not pressure_lines:
+            ask_back_text = await generate_ask_back(
+                context_block, text, reply_text, event.chat_id
+            )
+            if ask_back_text:
+                await asyncio.sleep(random.uniform(2, 5))
+                try:
+                    async with CipherElite.action(event.chat_id, "typing"):
+                        await asyncio.sleep(random.uniform(0.5, 1.5))
+                    await event.reply(ask_back_text)
+                    record_individual(event.chat_id, me.id, "KCE")
+                except Exception as e:
+                    dbg(f"ask-back send err: {e}")
+                    ask_back_text = None
+
+        # ── Follow-up (existing logic) ──
         followup = None
-        if random.random() < 0.4:
+        if not pressure_lines and not ask_back_text and random.random() < 0.4:
             followup = await generate_followup(context_block, text, reply_text, event.chat_id)
             if followup:
                 await asyncio.sleep(random.uniform(2, 6))
@@ -1529,12 +2152,14 @@ async def kce_reply_handler(event):
                 except Exception as e:
                     dbg(f"followup send err: {e}")
 
+        # ── Emoji reaction ──
         if random.random() < 0.3:
             try:
                 await sent.react(random.choice(REACTION_EMOJIS))
             except Exception:
                 pass
 
+        # ── Log card ──
         stamp = now_dict()
         chat = await event.get_chat()
         chat_name = getattr(chat, "title", "Unknown")
@@ -1554,12 +2179,15 @@ async def kce_reply_handler(event):
             "they_said": text[:200],
             "bot_reply": reply_text,
             "followup": followup,
+            "pressure_lines": pressure_lines,
+            "ask_back": ask_back_text,
             "time12": stamp["time12"],
             "date": stamp["date"],
             "ts": stamp["ts"],
             "trigger": trigger_type,
             "speed": speed_label,
             "mode": mode,
+            "pidgin": is_pidgin_room(event.chat_id),
             "jump_link": jump,
             "feedback": None,
         }
@@ -1569,7 +2197,10 @@ async def kce_reply_handler(event):
 
         card = build_reply_card(
             reply_num, chat_name, user_name, text, reply_text,
-            speed=speed_label, jump_link=jump, mode=mode, followup=followup
+            speed=speed_label, jump_link=jump, mode=mode,
+            followup=followup or ask_back_text,
+            extra_lines=pressure_lines,
+            pidgin=record["pidgin"]
         )
         await send_log(card)
 
@@ -1580,9 +2211,90 @@ async def kce_reply_handler(event):
         print(f"[aireply] handler err: {e}")
 
 
-print("[aireply] MODULE LOADED — chunk 8")
+# ═══════════════════════════════════════════════════════════════
+#  FLOW SELF-CONTINUATION LOOP (v3.6)
+# ═══════════════════════════════════════════════════════════════
 
-# ═══ END OF CHUNK 8 ═══
+async def flow_self_continue_loop():
+    """Every 20s, check if bot should self-continue on quiet rooms."""
+    await asyncio.sleep(25)
+    while True:
+        try:
+            if not FLOW_ENABLED:
+                await asyncio.sleep(20)
+                continue
+            fp_all = DB.get("flow_pending", {})
+            now = time.time()
+            for cid_str in list(fp_all.keys()):
+                fp = fp_all[cid_str]
+                if fp.get("replied"):
+                    continue
+                age = now - fp.get("ts", 0)
+                if age < FLOW_FOLLOWUP_WINDOW_SEC:
+                    continue
+                if age > 300:
+                    clear_flow_pending(int(cid_str))
+                    continue
+
+                cid = int(cid_str)
+                if not is_whitelisted(cid):
+                    clear_flow_pending(cid)
+                    continue
+                if not _can_fire_ceiling(cid):
+                    continue
+
+                # Check if anyone spoke after bot's last msg
+                gm = DB.get("group_messages", {}).get(cid_str, [])
+                bot_ts = fp.get("ts", 0)
+                human_after = [m for m in gm if m.get("ts", 0) > bot_ts]
+                if human_after:
+                    fp["replied"] = True
+                    save_db(DB)
+                    continue
+
+                if random.random() > FLOW_FOLLOWUP_CHANCE:
+                    clear_flow_pending(cid)
+                    continue
+
+                # Generate a soft opener to revive the room
+                room_mode = read_room(cid)
+                context_block = get_context(cid, limit=100)
+                last_bot_msg = None
+                replies = DB.get("replies", [])
+                for r in reversed(replies):
+                    if r.get("group_id") == cid and r.get("sent_msg_id") == fp.get("bot_msg_id"):
+                        last_bot_msg = r.get("bot_reply")
+                        break
+
+                opener = await generate_pressure_line(
+                    context_block,
+                    "(no new message — you want to keep the vibe going)",
+                    last_bot_msg or "hey",
+                    [], cid
+                )
+                if not opener:
+                    clear_flow_pending(cid)
+                    continue
+
+                try:
+                    await CipherElite.send_message(cid, opener)
+                    dbg(f"flow self-continued in {cid}: '{opener}'")
+                    record_individual(cid, (await CipherElite.get_me()).id, "KCE")
+                    _mark_hourly_fire(cid)
+                except Exception as e:
+                    dbg(f"flow self-cont err: {e}")
+
+                clear_flow_pending(cid)
+
+            await asyncio.sleep(20)
+        except Exception as e:
+            print(f"[aireply] flow loop err: {e}")
+            await asyncio.sleep(30)
+
+
+print("[aireply] MODULE LOADED — chunk 9")
+
+# ═══ END OF CHUNK 9 ═══
 # ═══════════════════════════════════════════════════════════════
 #  EDIT WATCHER — user edits bot's reply = learn preferred version
 # ═══════════════════════════════════════════════════════════════
@@ -1637,7 +2349,7 @@ async def kce_edit_watcher(event):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  DELETE WATCHER — user deletes bot's reply = learn to avoid
+#  DELETE WATCHER
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.MessageDeleted)
@@ -1680,7 +2392,7 @@ async def kce_delete_watcher(event):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  REACTION WATCHER — owner reacts ❤️/🤝/etc to bot = learn good
+#  REACTION WATCHER
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.Raw(events.Raw))
@@ -1755,7 +2467,6 @@ async def kce_reaction_watcher(event):
         target["feedback"] = "good"
         target["reacted_with"] = hit[0]
         save_db(DB)
-        dbg(f"reacted {hit[0]} to reply #{target.get('n')}")
 
         reply_text = target.get("bot_reply", "")
         if reply_text and len(reply_text) <= 30:
@@ -1779,7 +2490,7 @@ async def kce_reaction_watcher(event):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  OWNER FOLLOW-UP WATCHER — owner continues after bot
+#  OWNER FOLLOW-UP WATCHER
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage)
@@ -1792,7 +2503,6 @@ async def kce_owner_followup_watcher(event):
         text = event.raw_text or ""
         if not text or text.startswith((".", "..")):
             return
-
         if not event.is_reply:
             return
         replied = await event.get_reply_message()
@@ -1831,11 +2541,8 @@ async def kce_owner_followup_watcher(event):
         print(f"[aireply] owner followup err: {e}")
 
 
-print("[aireply] MODULE LOADED — chunk 9")
-
-# ═══ END OF CHUNK 9 ═══
 # ═══════════════════════════════════════════════════════════════
-#  FEEDBACK WATCHER — reply `good` / `bad` to log cards
+#  FEEDBACK WATCHER
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage(chats=AI_LOG_CHAT_ID))
@@ -1888,7 +2595,7 @@ async def feedback_watcher(event):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  DM WATCHER — suspicious only
+#  DM WATCHER
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage(func=lambda e: e.is_private and not e.out))
@@ -1918,7 +2625,7 @@ async def kce_dm_watcher(event):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  SUSPICIOUS REPLY WATCHER — replies to bot
+#  SUSPICIOUS REPLY WATCHER
 # ═══════════════════════════════════════════════════════════════
 
 @CipherElite.on(events.NewMessage)
@@ -1983,6 +2690,18 @@ async def memory_flusher_loop():
                 if time.time() - lb[cid].get("window_start", 0) > CONTEXT_WINDOW_SEC:
                     lb[cid] = {"window_start": time.time(), "counts": {}}
                     save_db(DB)
+
+            # v3.6: prune pidgin rooms older than window
+            pr = DB.get("pidgin_rooms", {})
+            pc = time.time() - PIDGIN_WINDOW_SEC
+            pr_changed = False
+            for cid in list(pr.keys()):
+                if pr[cid] < pc:
+                    del pr[cid]
+                    pr_changed = True
+            if pr_changed:
+                DB["pidgin_rooms"] = pr
+                save_db(DB)
         except Exception as e:
             print(f"[aireply] flusher err: {e}")
         await asyncio.sleep(LEARN_BATCH_SECONDS)
@@ -2000,6 +2719,8 @@ async def send_daily_summary():
         good = sum(1 for r in today_replies if r.get("feedback") == "good")
         bad = sum(1 for r in today_replies if r.get("feedback") == "bad")
         deleted = sum(1 for r in today_replies if r.get("feedback") == "deleted")
+        pressure = sum(1 for r in today_replies if r.get("pressure_lines"))
+        askbacks = sum(1 for r in today_replies if r.get("ask_back"))
 
         lines = [
             "╔══════════════════════════════════════╗",
@@ -2009,6 +2730,8 @@ async def send_daily_summary():
             "",
             f"💬 Replies today: `{len(today_replies)}`",
             f"👍 Good: `{good}`  👎 Bad: `{bad}`  🗑️ Deleted: `{deleted}`",
+            f"💥 Pressure bursts: `{pressure}`",
+            f"❓ Ask-backs: `{askbacks}`",
             f"🧬 Persona: `{len(DB.get('persona_phrases', []))}`",
             f"🚫 Banned: `{len(DB.get('banned_phrases', []))}`",
         ]
@@ -2102,6 +2825,11 @@ async def _plugin_bootstrap():
             dbg("daily summary started")
         except Exception as e:
             print(f"[aireply] summary start err: {e}")
+        try:
+            asyncio.create_task(flow_self_continue_loop())
+            dbg("flow self-continue loop started")
+        except Exception as e:
+            print(f"[aireply] flow start err: {e}")
         dbg("bootstrap complete")
     except Exception as e:
         print(f"[aireply] bootstrap err: {e}")
@@ -2113,27 +2841,27 @@ except Exception as e:
     print(f"[aireply] bootstrap init err: {e}")
 
 
-print("[aireply] MODULE LOADED SUCCESSFULLY — v3.5 ready")
+print("[aireply] MODULE LOADED SUCCESSFULLY — v3.6 ready")
 
 
 # ╔══════════════════════════════════════════════════════════════╗
-# ║  === END OF AIRREPLY v3.5 — CONTEST MODE ===                 ║
+# ║  === END OF AIRREPLY v3.6 — FLOW MODE ===                    ║
 # ║                                                              ║
 # ║  Personality: CALM / WARM / KIND                             ║
 # ║                                                              ║
-# ║  Learning signals:                                           ║
+# ║  v3.6 Additions:                                             ║
+# ║  • 🔥 Aggressive initiation (5th trigger path)               ║
+# ║  • 💥 Voice Pressure — up to 3 back-to-back lines            ║
+# ║  • 🌊 Flow Mode — self-continues if room goes quiet          ║
+# ║  • ❓ Ask-back — 35% chance for warm follow-up question      ║
+# ║  • 🗣️ Pidgin Matcher — auto-switches voice in pidgin rooms   ║
+# ║  • 🕐 Hourly ceiling 400 / floor 6                           ║
+# ║  • 🎛️ Toggles: aggressive / pressure / pidgin / flow         ║
+# ║                                                              ║
+# ║  Learning signals (unchanged):                               ║
 # ║  • Reply `good` / `bad` to log → persona / stats             ║
 # ║  • EDIT bot's reply → persona learns your version            ║
 # ║  • DELETE bot's reply → banned_phrases                       ║
 # ║  • REACT ❤️/🤝/💛/🫡/😊/🔥 → persona learns good             ║
 # ║  • Owner follows up after bot → persona learns style         ║
-# ║                                                              ║
-# ║  Contest mode:                                               ║
-# ║  • Tracks individual 24h leaderboard                         ║
-# ║  • Beats top human × 1.2                                     ║
-# ║  • 24h context to Gemini                                     ║
-# ║  • Room reading + tone adjust                                ║
-# ║  • Multi-message follow-up (40%)                             ║
-# ║  • Friendly question picker                                  ║
-# ║  • Forward-to-QUEUE when unsure                              ║
 # ╚══════════════════════════════════════════════════════════════╝
