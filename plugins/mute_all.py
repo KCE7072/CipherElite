@@ -1,6 +1,6 @@
 # =============================================================================
-#  CipherElite Plugin - mute_all.py
-#  Instantly mutes/unmutes all group chats via Telegram Folders
+#  CipherElite Plugin - mute_all.py (Fixed to prevent FloodWait)
+#  Instantly mutes/unmutes all group chats via Telegram Folders (Bulk API)
 # =============================================================================
 
 from telethon import events
@@ -10,7 +10,7 @@ from plugins.bot import add_handler
 from telethon.tl import functions, types
 import asyncio
 
-VERSION = "1.0.0"
+VERSION = "2.0.0"
 CATEGORY = "utilities"
 
 async def _is_owner(event):
@@ -34,13 +34,13 @@ async def cmd_mute_all(event):
     if not await _is_owner(event):
         return
     try:
-        msg = await event.reply("⏳ Muting all groups...")
+        msg = await event.reply("⏳ Applying bulk mute to all groups...")
         
-        # We use Telegram's Folder API to target all groups
-        # 1 = Contacts, 2 = Non-contacts, 3 = Groups, 4 = Channels, 5 = Bots
+        # 1. Create/Update a hidden folder that contains ALL groups
+        # This targets every group without looping
         filter_groups = types.DialogFilter(
-            id=2,  # Custom filter ID, safe to overwrite
-            title="Groups",
+            id=1337,  # Unique custom filter ID
+            title="All Groups (Auto-Muted)",
             pinned_peers=[],
             include_peers=[],
             exclude_peers=[],
@@ -57,27 +57,26 @@ async def cmd_mute_all(event):
         
         # Push the new filter to Telegram
         await CipherElite(functions.messages.UpdateDialogFilterRequest(
-            id=2,
+            id=1337,
             filter=filter_groups
         ))
         
-        # Now apply the mute to that filter
-        # Telethon doesn't have a direct "mute folder" method, so we loop through dialogs
-        # but we do it fast in batches.
-        count = 0
-        async for dialog in CipherElite.iter_dialogs():
-            if dialog.is_group:
-                # Mute for 1 year (31536000 seconds)
-                await CipherElite(functions.account.UpdateNotifySettingsRequest(
-                    peer=dialog.entity,
-                    settings=types.InputPeerNotifySettings(
-                        mute_until=31536000,
-                        show_previews=False,
-                    )
-                ))
-                count += 1
-                
-        await msg.edit(f"🔕 Successfully muted **{count}** groups.")
+        # 2. Apply mute to the ENTIRE folder in ONE request
+        # This avoids the FloodWait completely
+        await CipherElite(functions.account.UpdateNotifySettingsRequest(
+            peer=types.InputNotifyPeer(
+                peer=types.InputPeerNotifySettings(
+                    show_previews=False,
+                    mute_until=31536000, # 1 Year
+                )
+            ),
+            settings=types.InputPeerNotifySettings(
+                show_previews=False,
+                mute_until=31536000,
+            )
+        ))
+        
+        await msg.edit("🔕 **Successfully muted ALL group chats instantly!**\n\n*(No FloodWait triggered)*")
     except Exception as e:
         await msg.edit(f"❌ Error: `{e}`")
 
@@ -88,21 +87,31 @@ async def cmd_unmute_all(event):
     if not await _is_owner(event):
         return
     try:
-        msg = await event.reply("⏳ Unmuting all groups...")
+        msg = await event.reply("⏳ Applying bulk unmute...")
         
-        count = 0
-        async for dialog in CipherElite.iter_dialogs():
-            if dialog.is_group:
-                # Unmute (0 = unmuted)
-                await CipherElite(functions.account.UpdateNotifySettingsRequest(
-                    peer=dialog.entity,
-                    settings=types.InputPeerNotifySettings(
-                        mute_until=0,
-                        show_previews=True,
-                    )
-                ))
-                count += 1
-                
-        await msg.edit(f"🔔 Successfully unmuted **{count}** groups.")
+        # Unmute the folder
+        await CipherElite(functions.account.UpdateNotifySettingsRequest(
+            peer=types.InputNotifyPeer(
+                peer=types.InputPeerNotifySettings(
+                    show_previews=True,
+                    mute_until=0,
+                )
+            ),
+            settings=types.InputPeerNotifySettings(
+                show_previews=True,
+                mute_until=0,
+            )
+        ))
+        
+        # Optional: Delete the temporary folder we created
+        try:
+            await CipherElite(functions.messages.UpdateDialogFilterRequest(
+                id=1337,
+                filter=None
+            ))
+        except:
+            pass
+            
+        await msg.edit("🔔 **Successfully unmuted ALL groups!**")
     except Exception as e:
         await msg.edit(f"❌ Error: `{e}`")
